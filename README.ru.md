@@ -1,0 +1,320 @@
+# Сервис платежей
+
+[English version](README.md)
+
+Микросервис асинхронной обработки платежей. `POST /api/v1/payments` принимает платёж и возвращает
+`202`. Затем consumer пропускает платёж через эмулируемый платёжный шлюз, сохраняет результат и
+уведомляет клиента по webhook. Стек: FastAPI + Pydantic v2, SQLAlchemy 2.0 (async), PostgreSQL,
+RabbitMQ (FastStream), Alembic, Docker Compose. Задание описано в [docs/task-spec.md](docs/task-spec.md).
+
+## Архитектура
+
+```
+            POST /api/v1/payments
+ client ───────────────────────────► api
+                                      │  one DB transaction:
+                                      │  INSERT payments (status=pending) + INSERT outbox
+                                      ▼
+                                  PostgreSQL ◄──────────────────────────────┐
+                                      │ SELECT ... FOR UPDATE SKIP LOCKED   │
+                                      ▼                                     │
+                                    relay ── publish + confirm ──► RabbitMQ │
+                                                    exchange `payments`     │
+                                                    queue `payments.new`    │
+                                                          │                 │
+                                                          ▼                 │
+                                                      consumer              │
+                                  1. read payment (pending?)                │
+                                  2. gateway emulation (2-5 s, 90% success) │
+                                  3. UPDATE payments SET status ... ────────┘
+                                  4. POST webhook_url (retry + backoff)
+                                                          │
+                       after 3 failed deliveries          ▼
+                  `payments.new` ── dead-letter ──► exchange `payments.dlx`
+                                                    └► queue `payments.new.dlq`
+```
+
+Процессы (каждый — отдельный сервис compose): `api` (HTTP), `relay` (outbox → RabbitMQ), `consumer`
+(`payments.new` → шлюз → БД → webhook), `migrate` (один раз выполняет `alembic upgrade head` и
+завершается). Все долгоживущие сервисы (`postgres`, `rabbitmq`, `api`, `relay`, `consumer`) запущены
+с `restart: unless-stopped`: relay и consumer восстанавливаются после падений, а перезапущенная
+зависимость возвращается в строй. Неопубликованные строки outbox и неподтверждённые сообщения
+обрабатываются заново. У `migrate` одноразовый запуск, политики перезапуска нет.
+
+Структура кода (`src/app`): `api/` (маршруты, зависимости, обработчики ошибок), `services.py`
+(создание и получение платежа), `repositories.py`, `domain.py` (`Money`, `Currency`, конечный
+автомат статусов), `processing.py` (сценарий consumer), `gateway.py`, `webhook.py`, `messaging/`
+(`topology.py`, `relay.py`, `consumer.py`, `outbox_repository.py`), `models.py`, `config.py`.
+
+## Запуск
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Сервисы: `postgres`, `rabbitmq`, `migrate` (применяет миграции и завершается), `api`
+(http://localhost:8000, документация OpenAPI по адресу `/docs`), `relay`, `consumer`. На хост
+проброшены порты 8000 (API), 5672 и 15672 (RabbitMQ). PostgreSQL наружу не публикуется.
+
+Конфигурация берётся из `.env` (копия `.env.example`) через подстановку переменных в compose. У
+каждой переменной в `docker-compose.yml` есть значение по умолчанию, поэтому стек запускается и без
+`.env`. Compose собирает `DATABASE_URL` и `RABBITMQ_URL` из `POSTGRES_*`, `RABBITMQ_*` и имён
+сервисов. URL с localhost в `.env.example` нужны только для запуска процессов на хосте. API-ключ по
+умолчанию — `change-me`. `API_PORT` (по умолчанию 8000) задаёт порт хоста, на котором публикуется
+API. Настройки приложения описаны в `src/app/config.py`: `DATABASE_URL`, `RABBITMQ_URL` и `API_KEY`
+обязательны. У интервала опроса и размера пачки relay, `WEBHOOK_MAX_ATTEMPTS`, backoff и таймаута
+webhook, диапазона задержки и доли успехов шлюза есть значения по умолчанию.
+При некорректных значениях приложение не запускается: `RELAY_BATCH_SIZE` и `WEBHOOK_MAX_ATTEMPTS`
+должны быть не меньше 1, `GATEWAY_SUCCESS_RATE` — от 0 до 1, а `GATEWAY_MIN_SECONDS` не должен
+превышать `GATEWAY_MAX_SECONDS`.
+
+## Тесты, линтер, типы
+
+Тесты используют настоящие PostgreSQL и RabbitMQ через testcontainers, поэтому Docker должен быть
+запущен.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+
+pytest                     # starts postgres:16 and a RabbitMQ container
+pytest --cov=app --cov-branch --cov-report=term-missing   # same, with line and branch coverage
+ruff check . && ruff format --check .
+mypy                       # strict
+```
+
+Чтобы использовать готовую базу вместо контейнера PostgreSQL, задайте `TEST_DATABASE_URL` (URL
+SQLAlchemy с asyncpg). К ней применяются миграции, а перед каждым тестом таблицы `payments` и
+`outbox` очищаются, поэтому не указывайте базу с нужными вам данными:
+
+```bash
+TEST_DATABASE_URL=postgresql+asyncpg://payments:payments@localhost:5432/payments_test pytest
+```
+
+RabbitMQ для тестов consumer и relay всё равно запускается в контейнере.
+
+## API
+
+Все эндпоинты требуют заголовок `X-API-Key`. Примеры ниже рассчитаны на `.env` по умолчанию.
+
+Создание платежа (заголовок `Idempotency-Key` обязателен). `amount` — десятичное число не более чем
+с двумя знаками после запятой, `currency` — `RUB`, `USD` или `EUR`:
+
+```bash
+curl -i -X POST http://localhost:8000/api/v1/payments \
+  -H 'X-API-Key: change-me' \
+  -H 'Idempotency-Key: order-1001' \
+  -H 'Content-Type: application/json' \
+  -d '{"amount": "100.50", "currency": "USD", "description": "Order 1001",
+       "metadata": {"order_id": 1001}, "webhook_url": "http://host.docker.internal:9000/hook"}'
+```
+
+```
+HTTP/1.1 202 Accepted
+{"payment_id":"0b0e5f1e-...","status":"pending","created_at":"2026-01-01T12:00:00.123456Z"}
+```
+
+Повторите ту же команду: вернётся тот же `payment_id` (снова `202`), новый платёж и новое событие не
+создаются. Теперь используйте тот же ключ с другим телом запроса (здесь другая сумма):
+
+```bash
+curl -i -X POST http://localhost:8000/api/v1/payments \
+  -H 'X-API-Key: change-me' -H 'Idempotency-Key: order-1001' -H 'Content-Type: application/json' \
+  -d '{"amount": "999.00", "currency": "USD", "description": "Order 1001",
+       "metadata": {"order_id": 1001}, "webhook_url": "http://host.docker.internal:9000/hook"}'
+# HTTP/1.1 409 Conflict
+# {"error":{"code":"idempotency_key_conflict","message":"Idempotency-Key was already used with a different request payload"}}
+```
+
+Получение платежа (через несколько секунд после создания `status` становится `succeeded` или
+`failed`, а `processed_at` заполняется):
+
+```bash
+curl -s http://localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: change-me'
+```
+
+```json
+{"payment_id": "0b0e5f1e-...", "amount": "100.50", "currency": "USD", "description": "Order 1001",
+ "metadata": {"order_id": 1001}, "status": "succeeded",
+ "webhook_url": "http://host.docker.internal:9000/hook",
+ "created_at": "2026-01-01T12:00:00.123456Z", "processed_at": "2026-01-01T12:00:03.456789Z"}
+```
+
+Отсутствующий или неверный API-ключ и отсутствующий `Idempotency-Key`:
+
+```bash
+curl -i http://localhost:8000/api/v1/payments/<payment_id>
+# 401 {"error":{"code":"unauthorized","message":"Missing or invalid API key"}}
+
+curl -i -X POST http://localhost:8000/api/v1/payments -H 'X-API-Key: change-me' \
+  -H 'Content-Type: application/json' \
+  -d '{"amount": "1.00", "currency": "EUR", "description": "x", "webhook_url": "http://example.com/h"}'
+# 400 {"error":{"code":"idempotency_key_required","message":"Idempotency-Key header is required"}}
+```
+
+### Ошибки
+
+У всех ошибок одинаковая структура. `code` стабилен, `message` предназначен для людей. Отклонённые
+входные значения в ответе не возвращаются.
+
+```json
+{"error": {"code": "validation_error", "message": "body.amount: Value error, Amount must be positive"}}
+```
+
+| Статус | `code` | Когда |
+| --- | --- | --- |
+| 202 | | Платёж принят (новый либо исходный — при повторе того же ключа и тела) |
+| 400 | `idempotency_key_required` | Заголовок `Idempotency-Key` отсутствует или пуст |
+| 400 | `idempotency_key_invalid` | `Idempotency-Key` длиннее 255 символов |
+| 401 | `unauthorized` | `X-API-Key` отсутствует или неверен |
+| 404 | `payment_not_found` | Неизвестный или некорректный `payment_id` |
+| 404 | `not_found` | Неизвестный маршрут (сообщение — стандартное `Not Found` фреймворка) |
+| 409 | `idempotency_key_conflict` | Ключ уже использован с другим телом запроса |
+| 405 | `http_error` | Неверный метод для маршрута. Любая другая HTTP-ошибка фреймворка тоже приходит как `http_error` со своим статусом и сообщением |
+| 422 | `validation_error` | Некорректное тело: неположительная сумма, больше 2 знаков после запятой, сумма больше 1 000 000 000.00, неизвестная валюта, пустое описание, `webhook_url` не http(s), неизвестные поля |
+
+Неожиданные ошибки приводят к обычному `500` и пишутся в лог. Подробности клиентам не возвращаются.
+
+### Webhook
+
+Consumer отправляет `POST <webhook_url>` с JSON-телом:
+
+```json
+{"payment_id": "0b0e5f1e-...", "status": "succeeded", "amount": "100.50",
+ "currency": "USD", "processed_at": "2026-01-01T12:00:03.456789+00:00"}
+```
+
+Небольшой приёмник для проверки. Он должен быть доступен из контейнера `consumer`. В Docker Desktop
+используйте `http://host.docker.internal:9000/hook` как `webhook_url`. В Linux это имя требует
+записи `extra_hosts`, которую compose не добавляет:
+
+```python
+# receiver.py: python receiver.py
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Hook(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        print(body.decode(), flush=True)
+        self.send_response(200)
+        self.end_headers()
+
+
+HTTPServer(("0.0.0.0", 9000), Hook).serve_forever()
+```
+
+### Интерфейс RabbitMQ и DLQ
+
+Откройте http://localhost:15672 (логин и пароль — `RABBITMQ_USER` / `RABBITMQ_PASSWORD`, по умолчанию
+`guest` / `guest`).
+
+- Очереди: `payments.new` (quorum) и `payments.new.dlq`. Обменники: `payments` (direct) и
+  `payments.dlx` (fanout).
+- Чтобы увидеть, как сообщение попадает в DLQ, создайте платёж с `webhook_url`, который всегда
+  завершается ошибкой (например, `http://host.docker.internal:9999/hook`, где никто не слушает, или
+  приёмник, отвечающий 500). После 3 доставок (примерно 10–20 с: три раунда отправки webhook, в
+  каждом свой backoff) сообщение появится в `payments.new.dlq`. Посмотреть его можно через Get
+  messages. Сам платёж к этому моменту уже `succeeded` или `failed` в БД, не доставлено только
+  уведомление.
+
+## Проектные решения и компромиссы
+
+**Transactional outbox, at-least-once.** Строка платежа и строка outbox вставляются в одной
+транзакции, поэтому событие существует тогда и только тогда, когда существует платёж. `relay`
+выбирает неопубликованные строки через `FOR UPDATE SKIP LOCKED` (несколько relay работают, не
+блокируя друг друга и не дублируя пачки), публикует каждую с подтверждением издателя (publisher
+confirms) и `message_id`, равным id строки outbox, и помечает её опубликованной в той же транзакции,
+которая держит блокировку. Если процесс упадёт между подтверждением брокера и коммитом, строка
+будет опубликована повторно. Поэтому доставка at-least-once, и consumer обязан переносить дубли.
+Если RabbitMQ недоступен, строки просто остаются неопубликованными и публикуются позже, а relay
+переподключается при запуске. Relay публикует с `mandatory=True` в канале с `on_return_raises`,
+поэтому сообщение, которое не принимает ни одна очередь (например, при пропавшей привязке), вызывает
+исключение, а не теряется. Его строка остаётся неопубликованной и будет отправлена повторно.
+
+**Идемпотентный consumer.** В `payments.new` передаётся только `payment_id`. Завершённый платёж
+пропускает шлюз и только повторяет webhook, поэтому повторная доставка сообщения не приведёт к
+двойному списанию. Сообщение о несуществующем платеже логируется и подтверждается (повторная
+доставка не поможет).
+
+**Ключ идемпотентности.** У `payments.idempotency_key` есть ограничение уникальности, а создание
+выполняется через `INSERT ... ON CONFLICT DO NOTHING RETURNING`. Поэтому у параллельных дублей ровно
+один победитель, а окна «проверить, затем вставить» нет. Отпечаток запроса (SHA-256 от канонического
+тела, `10.5` и `10.50` считаются равными) хранится вместе с платежом. Тот же ключ и тот же отпечаток
+возвращают исходный платёж, тот же ключ и другой отпечаток дают `409`. Ключ глобальный, а не
+привязан к клиенту (используется единственный статический API-ключ).
+
+**Деньги.** Колонка имеет тип `NUMERIC(18,2)` с проверкой на положительное значение. Доменный
+объект-значение `Money` (`Decimal` плюс `Currency`) используется только для валидации в API. Он
+отклоняет неположительные суммы, более 2 знаков после запятой (отклоняет, а не округляет) и суммы
+выше максимума, а ORM-модель хранит обычную числовую колонку и строку с валютой. API принимает и
+возвращает суммы как десятичные строки, никогда не как float. Масштаб и максимум заданы один раз, в
+`domain.py`.
+
+**Лимит доставок и DLQ.** `payments.new` — это quorum-очередь с `x-delivery-limit`, обменником
+dead-letter `payments.dlx` (fanout) и режимом `at-least-once` для dead-lettering.
+`x-delivery-limit` считает повторные доставки, а не доставки, поэтому для 3 доставок всего он равен
+2 (константа `QUEUE_MAX_DELIVERY_ATTEMPTS` в `messaging/topology.py`, проверена на настоящем брокере
+в `tests/test_relay.py`). Это аргумент очереди, а не настройка: он не зависит от
+`WEBHOOK_MAX_ATTEMPTS`, а его изменение у существующей очереди завершается ошибкой
+`PRECONDITION_FAILED`. При любом исключении consumer делает nack с requeue, из-за чего RabbitMQ
+повторяет доставку до лимита, а затем отправляет сообщение в dead-letter.
+
+**Ядовитые сообщения.** Сообщение, тело которого не является корректным JSON, не содержит
+`payment_id` или содержит `payment_id`, не являющийся UUID, не проходит валидацию до вызова
+обработчика. Это считается исключением, поэтому его, как и любой другой сбой, nack-ают с requeue, и
+после 3 доставок оно оказывается в `payments.new.dlq` с исходным телом. Оно не зацикливается
+навсегда и не затрагивает ни один платёж (`tests/test_consumer.py`). Сообщение о несуществующем
+платеже — обратный случай: его подтверждают и отбрасывают, потому что повторная доставка не
+восстановит отсутствующую строку.
+
+**Повторы webhook.** В рамках одной доставки webhook отправляется до `WEBHOOK_MAX_ATTEMPTS` (3) раз
+с экспоненциальным backoff и jitter (`base * 2^(n-1)` плюс до `base`, base — 1 с). Повторяются
+сетевые ошибки (соединение, таймаут) и HTTP 5xx, 408, 429. Не повторяются другие 4xx и редиректы
+(постоянный отказ). Они не повторяются внутри процесса, но доставка всё равно считается неудачной.
+Неудачная доставка вызывает исключение, сообщение возвращается в очередь, а следующая доставка
+пропускает шлюз (статус уже финальный) и снова пробует отправить webhook. После 3 доставок
+сообщение уходит в DLQ. В худшем случае на один URL приходит до 9 POST-запросов.
+
+**Компромисс: повторы webhook выполняются внутри обработчика.** Пока webhook повторяется, сообщение
+остаётся неподтверждённым (в сбойном случае не менее 3 с на backoff), а медленный получатель держит
+слот consumer до `WEBHOOK_TIMEOUT_SECONDS` на каждую попытку. Это самый простой способ выполнить
+требование «3 попытки с экспоненциальной задержкой» без дополнительных очередей задержки. При
+реальной нагрузке повторы стоило бы вынести в очередь с задержкой или отдельный outbox для webhook.
+
+**Параллелизм consumer.** Во время сна шлюза (2–5 с) транзакция и соединение с БД не удерживаются:
+платёж читается, сессия закрывается, шлюз отрабатывает, затем в новой короткой транзакции
+сохраняется результат.
+
+**Конечный автомат.** `pending → succeeded | failed`, определён в одном месте (`domain.py`), оба
+финальных состояния терминальные. Результат записывается условным `UPDATE ... WHERE status =
+'pending'`, поэтому из нескольких воркеров, обрабатывающих один платёж, побеждает первая запись, а
+остальные принимают сохранённый результат, а не перезаписывают его.
+
+**Известное ограничение: повторный вызов шлюза при настоящей конкуренции.** Состояния `processing`
+и блокировки нет. Если одно и то же сообщение доставлено двум воркерам одновременно (например,
+дубль от relay, обработанный параллельно, или повторная доставка после падения consumer посреди
+вызова), оба могут обратиться к шлюзу. База остаётся корректной (первая запись побеждает, итоговый
+статус один), но настоящему шлюзу понадобился бы собственный ключ идемпотентности, чтобы не списать
+деньги дважды. Получатели webhook тоже могут получить одно уведомление больше одного раза
+(at-least-once), поэтому им следует дедуплицировать по `payment_id`.
+
+**Прочее.** Временные метки в UTC и с часовым поясом. ID платежей — случайные UUID. Строка запроса
+(query string) в URL webhook никогда не попадает в логи, потому что в ней могут быть токены.
+API-ключ сравнивается за постоянное время. Конфигурация читается в одном месте (`config.py`).
+
+## Что намеренно не сделано и что дальше
+
+- Аутентификация по клиентам и области идемпотентности по клиентам (сейчас один статический
+  API-ключ и глобальные ключи идемпотентности).
+- Клиент реального платёжного шлюза (со своим ключом идемпотентности и таймаутами).
+- HMAC-подпись webhook, чтобы получатели могли проверить отправителя.
+- Защита от SSRF: `webhook_url` проверяется только на http(s). Блокировка приватных и loopback-
+  адресов, списки разрешённых адресов и DNS pinning не реализованы.
+- Метрики и трассировка (глубина очереди, отставание outbox, размер DLQ, correlation id). Есть
+  только логи.
+- Очистка outbox: опубликованные строки хранятся вечно. Нужны срок хранения или партиционирование.
+- Состояние `processing` (или advisory lock), чтобы закрыть окно повторного вызова шлюза, и повтор
+  webhook через очередь с задержкой, который не удерживает сообщение.
+- Инструмент для просмотра и повторной отправки сообщений из DLQ.

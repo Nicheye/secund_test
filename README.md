@@ -1,5 +1,7 @@
 # Payment service
 
+[Русская версия](README.ru.md)
+
 Asynchronous payment processing microservice. `POST /api/v1/payments` accepts a payment and returns
 `202`; a consumer later runs it through an emulated payment gateway, stores the result and notifies
 the client by webhook. Stack: FastAPI + Pydantic v2, SQLAlchemy 2.0 (async), PostgreSQL, RabbitMQ

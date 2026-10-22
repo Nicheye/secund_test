@@ -371,6 +371,59 @@ async def test_rejects_create_with_422_when_metadata_is_not_an_object(
     assert await fetch_payments(session_factory) == []
 
 
+METADATA_LIMIT_BYTES = 16384
+# `{"k":""}` is 8 bytes of compact JSON, so the filler brings the total to the target size.
+METADATA_FRAME_BYTES = 8
+
+
+@pytest.mark.parametrize(
+    "filler",
+    [
+        "x" * (METADATA_LIMIT_BYTES - METADATA_FRAME_BYTES),
+        # Two bytes per character in UTF-8: the limit counts bytes, not characters.
+        "ж" * ((METADATA_LIMIT_BYTES - METADATA_FRAME_BYTES) // 2),
+    ],
+)
+async def test_accepts_metadata_of_exactly_sixteen_kibibytes(
+    client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession], filler: str
+) -> None:
+    metadata = {"k": filler}
+
+    response = await client.post(
+        PAYMENTS_URL, json={**VALID_BODY, "metadata": metadata}, headers=headers()
+    )
+
+    assert response.status_code == 202
+    [payment] = await fetch_payments(session_factory)
+    assert payment.payment_metadata == metadata
+
+
+@pytest.mark.parametrize(
+    "filler",
+    [
+        "x" * (METADATA_LIMIT_BYTES - METADATA_FRAME_BYTES + 1),
+        "ж" * ((METADATA_LIMIT_BYTES - METADATA_FRAME_BYTES) // 2 + 1),
+    ],
+)
+async def test_rejects_metadata_over_sixteen_kibibytes_with_422_naming_metadata(
+    client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession], filler: str
+) -> None:
+    response = await client.post(
+        PAYMENTS_URL, json={**VALID_BODY, "metadata": {"k": filler}}, headers=headers()
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "validation_error",
+            "message": (
+                "body.metadata: Value error, Metadata must be at most 16384 bytes as compact JSON"
+            ),
+        }
+    }
+    assert await fetch_payments(session_factory) == []
+
+
 @pytest.mark.parametrize("description", ["x", "Order 42", "d" * 1000, "Заказ", "line\nbreak"])
 async def test_accepts_description_from_one_to_one_thousand_characters(
     client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession], description: str

@@ -1,15 +1,17 @@
+import json
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+from pydantic import AfterValidator, AnyHttpUrl, BaseModel, ConfigDict, Field, PlainSerializer
 
-from app.domain import Currency, InvalidMoney, Money, PaymentStatus
+from app.domain import Currency, PaymentStatus, validate_amount
 from app.models import Payment
 
 MAX_DESCRIPTION_LENGTH = 1000
 MAX_WEBHOOK_URL_LENGTH = 2048
+MAX_METADATA_BYTES = 16 * 1024
 
 # Amounts go out as strings so that clients never parse money through a float.
 AmountString = Annotated[
@@ -17,24 +19,24 @@ AmountString = Annotated[
 ]
 
 
+def _validate_metadata_size(metadata: dict[str, Any]) -> dict[str, Any]:
+    # Compact UTF-8 JSON, so the limit does not depend on the client's whitespace.
+    size = len(json.dumps(metadata, separators=(",", ":"), ensure_ascii=False).encode())
+    if size > MAX_METADATA_BYTES:
+        raise ValueError(f"Metadata must be at most {MAX_METADATA_BYTES} bytes as compact JSON")
+    return metadata
+
+
 class CreatePaymentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    amount: Decimal
+    amount: Annotated[Decimal, AfterValidator(validate_amount)]
     currency: Currency
     description: str = Field(min_length=1, max_length=MAX_DESCRIPTION_LENGTH)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: Annotated[dict[str, Any], AfterValidator(_validate_metadata_size)] = Field(
+        default_factory=dict
+    )
     webhook_url: AnyHttpUrl = Field(max_length=MAX_WEBHOOK_URL_LENGTH)
-
-    @field_validator("amount")
-    @classmethod
-    def validate_amount(cls, amount: Decimal) -> Decimal:
-        # Money rules do not depend on the currency yet, so any currency validates the amount.
-        try:
-            Money(amount, Currency.USD)
-        except InvalidMoney as error:
-            raise ValueError(str(error)) from error
-        return amount
 
 
 class PaymentCreatedResponse(BaseModel):

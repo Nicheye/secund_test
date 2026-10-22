@@ -18,6 +18,9 @@ QUEUE_MAX_DELIVERY_ATTEMPTS = 3
 # than the attempts: the message is dead-lettered when attempt 3 is rejected
 # (verified against RabbitMQ in tests/test_relay.py).
 # "at-least-once" dead-lettering keeps the message in the queue until the DLX has confirmed it.
+# RabbitMQ only honours it together with `x-overflow: reject-publish`; otherwise it logs a warning
+# and silently falls back to at-most-once (verified on rabbitmq:4.0). The queue has no
+# max-length, so the overflow strategy never triggers; it is set only to enable the strategy.
 payments_new_queue = RabbitQueue(
     "payments.new",
     queue_type=QueueType.QUORUM,
@@ -27,6 +30,7 @@ payments_new_queue = RabbitQueue(
         "x-delivery-limit": QUEUE_MAX_DELIVERY_ATTEMPTS - 1,
         "x-dead-letter-exchange": payments_dlx.name,
         "x-dead-letter-strategy": "at-least-once",
+        "x-overflow": "reject-publish",
     },
 )
 

@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.domain import PaymentStatus
+from app.domain import PaymentSnapshot, PaymentStatus
 from app.messaging.consumer import create_app as create_consumer_app
 from app.messaging.relay import Relay
 from app.messaging.topology import declare_topology, payments_dlq, payments_new_queue
@@ -24,7 +24,7 @@ CONSUME_TIMEOUT_SECONDS = 30.0
 class FakeGateway:
     """Third-party boundary: answers at once, without the emulated delay."""
 
-    async def process(self, payment: Payment) -> PaymentStatus:
+    async def charge(self, payment: PaymentSnapshot) -> PaymentStatus:
         return PaymentStatus.SUCCEEDED
 
 
@@ -32,9 +32,9 @@ class RecordingWebhookSender:
     """Third-party boundary: records what would have been POSTed to the client."""
 
     def __init__(self) -> None:
-        self.payments: list[Payment] = []
+        self.payments: list[PaymentSnapshot] = []
 
-    async def send(self, payment: Payment) -> None:
+    async def send(self, payment: PaymentSnapshot) -> None:
         self.payments.append(payment)
 
 
@@ -108,7 +108,7 @@ async def test_created_payment_is_relayed_consumed_and_notified_exactly_once(
 class DecliningGateway:
     """Third-party boundary: the provider declines every payment."""
 
-    async def process(self, payment: Payment) -> PaymentStatus:
+    async def charge(self, payment: PaymentSnapshot) -> PaymentStatus:
         return PaymentStatus.FAILED
 
 

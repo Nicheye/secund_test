@@ -74,7 +74,7 @@ async def test_upgrade_creates_both_tables_and_the_partial_index(empty_database_
     alembic(empty_database_url, "upgrade", "head")
 
     assert await list_tables(empty_database_url) == ["alembic_version", "outbox", "payments"]
-    assert "ix_outbox_unpublished_created_at" in await list_indexes(empty_database_url)
+    assert "ix_outbox_unpublished_order" in await list_indexes(empty_database_url)
 
 
 async def test_upgrade_leaves_no_difference_between_models_and_schema(
@@ -125,4 +125,69 @@ def test_there_is_exactly_one_migration_head() -> None:
         check=True,
     )
 
-    assert result.stdout.strip().splitlines() == ["0001 (head)"]
+    assert result.stdout.strip().splitlines() == ["0002 (head)"]
+
+
+async def test_upgrade_0002_keeps_existing_outbox_rows_with_zero_attempts_and_no_error(
+    empty_database_url: str,
+) -> None:
+    alembic(empty_database_url, "upgrade", "0001")
+    migrated_engine = create_engine(empty_database_url)
+    try:
+        async with migrated_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO payments (id, amount, currency, description, status, "
+                    "idempotency_key, request_fingerprint, webhook_url) VALUES "
+                    "(gen_random_uuid(), 1, 'USD', 'd', 'pending', 'k', 'f', 'http://x')"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO outbox (id, aggregate_id, event_type, payload) "
+                    "SELECT gen_random_uuid(), id, 'payment.created', '{}' FROM payments"
+                )
+            )
+
+        alembic(empty_database_url, "upgrade", "head")
+
+        async with migrated_engine.connect() as connection:
+            row = (
+                await connection.execute(text("SELECT publish_attempts, last_error FROM outbox"))
+            ).one()
+    finally:
+        await migrated_engine.dispose()
+    assert tuple(row) == (0, None)
+
+
+async def list_outbox_columns(database_url: str) -> list[str]:
+    migrated_engine = create_engine(database_url)
+    try:
+        async with migrated_engine.connect() as connection:
+            rows = await connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'outbox' ORDER BY 1"
+                )
+            )
+            return [row[0] for row in rows]
+    finally:
+        await migrated_engine.dispose()
+
+
+async def test_downgrade_0002_restores_the_old_outbox_schema_and_upgrade_reapplies_it(
+    empty_database_url: str,
+) -> None:
+    alembic(empty_database_url, "upgrade", "head")
+
+    alembic(empty_database_url, "downgrade", "0001")
+    columns_after_downgrade = await list_outbox_columns(empty_database_url)
+    indexes_after_downgrade = await list_indexes(empty_database_url)
+    alembic(empty_database_url, "upgrade", "head")
+
+    assert "publish_attempts" not in columns_after_downgrade
+    assert "last_error" not in columns_after_downgrade
+    assert "ix_outbox_unpublished_created_at" in indexes_after_downgrade
+    assert "ix_outbox_unpublished_order" not in indexes_after_downgrade
+    assert "publish_attempts" in await list_outbox_columns(empty_database_url)
+    assert "ix_outbox_unpublished_order" in await list_indexes(empty_database_url)

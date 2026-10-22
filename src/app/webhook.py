@@ -1,14 +1,15 @@
 import asyncio
 import logging
 import random
+from dataclasses import dataclass
 from datetime import UTC
 from typing import Protocol
 
 import httpx
 
 from app.config import Settings
-from app.gateway import Sleeper
-from app.models import Payment
+from app.domain import PaymentSnapshot
+from app.timing import Sleeper
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,14 @@ class WebhookDeliveryError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class PostFailure:
+    retryable: bool
+    description: str
+
+
 class WebhookSender(Protocol):
-    async def send(self, payment: Payment) -> None: ...
+    async def send(self, payment: PaymentSnapshot) -> None: ...
 
 
 def _loggable_url(url: str) -> str:
@@ -53,7 +60,7 @@ class HttpWebhookSender:
         self._sleeper = sleeper
         self._rng = rng or random.Random()
 
-    async def send(self, payment: Payment) -> None:
+    async def send(self, payment: PaymentSnapshot) -> None:
         if payment.processed_at is None:
             raise ValueError("Webhook can only be sent for a processed payment")
         payload = {
@@ -66,36 +73,38 @@ class HttpWebhookSender:
         url = _loggable_url(payment.webhook_url)
 
         for attempt in range(1, self._max_attempts + 1):
-            reason = await self._post(payment.webhook_url, payload)
-            if reason is None:
+            failure = await self._post(payment.webhook_url, payload)
+            if failure is None:
                 return
-            retryable, description = reason
             logger.warning(
                 "Webhook attempt %d/%d failed payment_id=%s url=%s reason=%s",
                 attempt,
                 self._max_attempts,
                 payment.id,
                 url,
-                description,
+                failure.description,
             )
-            if not retryable:
-                raise WebhookDeliveryError(f"Webhook rejected: {description}")
-            if attempt < self._max_attempts:
-                await self._sleeper(self._backoff_delay(attempt))
+            if not failure.retryable:
+                raise WebhookDeliveryError(f"Webhook rejected: {failure.description}")
+            if attempt == self._max_attempts:
+                raise WebhookDeliveryError(
+                    f"Webhook not delivered after {self._max_attempts} attempts: "
+                    f"{failure.description}"
+                )
+            await self._sleeper(self._backoff_delay(attempt))
 
-        raise WebhookDeliveryError(
-            f"Webhook not delivered after {self._max_attempts} attempts: {description}"
-        )
-
-    async def _post(self, url: str, payload: dict[str, str]) -> tuple[bool, str] | None:
-        """Returns None on success, otherwise (is_retryable, description)."""
+    async def _post(self, url: str, payload: dict[str, str]) -> PostFailure | None:
+        """Returns None on success, otherwise why the attempt failed."""
         try:
             response = await self._client.post(url, json=payload, timeout=self._timeout_seconds)
         except httpx.TransportError as error:
-            return True, type(error).__name__
+            return PostFailure(retryable=True, description=type(error).__name__)
         if response.is_success:
             return None
-        return _is_retryable(response.status_code), f"HTTP {response.status_code}"
+        return PostFailure(
+            retryable=_is_retryable(response.status_code),
+            description=f"HTTP {response.status_code}",
+        )
 
     def _backoff_delay(self, attempt: int) -> float:
         exponential = self._backoff_base_seconds * 2.0 ** (attempt - 1)

@@ -1,17 +1,14 @@
 import asyncio
 import random
-from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from app.config import Settings
-from app.domain import PaymentStatus
-from app.models import Payment
-
-Sleeper = Callable[[float], Awaitable[None]]
+from app.domain import PaymentSnapshot, PaymentStatus
+from app.timing import Sleeper
 
 
 class PaymentGateway(Protocol):
-    async def process(self, payment: Payment) -> PaymentStatus: ...
+    async def charge(self, payment: PaymentSnapshot) -> PaymentStatus: ...
 
 
 class EmulatedGateway:
@@ -29,7 +26,7 @@ class EmulatedGateway:
         self._sleeper = sleeper
         self._rng = rng or random.Random()
 
-    async def process(self, payment: Payment) -> PaymentStatus:
+    async def charge(self, payment: PaymentSnapshot) -> PaymentStatus:
         await self._sleeper(self._rng.uniform(self._min_seconds, self._max_seconds))
         if self._rng.random() < self._success_rate:
             return PaymentStatus.SUCCEEDED

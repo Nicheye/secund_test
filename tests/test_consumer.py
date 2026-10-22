@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.messaging.consumer as consumer_module
 from app.config import Settings, get_settings
-from app.domain import PaymentStatus
+from app.domain import Currency, PaymentSnapshot, PaymentStatus
 from app.gateway import EmulatedGateway
 from app.messaging.consumer import create_app
 from app.messaging.topology import (
@@ -28,7 +28,7 @@ from app.messaging.topology import (
     payments_new_queue,
 )
 from app.models import Payment
-from app.processing import complete_payment
+from app.payment_finalization import finalize_payment
 from app.webhook import HttpWebhookSender, WebhookDeliveryError
 
 WEBHOOK_URL = "https://client.example/hook"
@@ -64,6 +64,17 @@ class WebhookReceiver:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.bodies.append(json.loads(request.content))
         return httpx.Response(self.status_code)
+
+
+def make_snapshot() -> PaymentSnapshot:
+    return PaymentSnapshot(
+        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        amount=Decimal("10.50"),
+        currency=Currency.USD,
+        status=PaymentStatus.PENDING,
+        webhook_url=WEBHOOK_URL,
+        processed_at=None,
+    )
 
 
 def make_gateway(
@@ -128,7 +139,7 @@ async def test_gateway_succeeds_with_configured_probability(
 ) -> None:
     gateway = make_gateway(settings, [0.0, outcome_roll])
 
-    result = await gateway.process(Payment())
+    result = await gateway.charge(make_snapshot())
 
     assert result == expected_status
 
@@ -137,7 +148,7 @@ async def test_gateway_sleeps_a_uniform_time_within_configured_bounds(settings: 
     sleeper = SleepRecorder()
     gateway = make_gateway(settings, [0.5, 0.0], sleeper)
 
-    await gateway.process(Payment())
+    await gateway.charge(make_snapshot())
 
     assert sleeper.delays == [3.5]
 
@@ -148,7 +159,7 @@ async def test_successful_gateway_outcome_sets_succeeded_and_processed_at(
     payment_id = await insert_payment(session_factory)
     receiver = WebhookReceiver()
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         payment_id,
         make_gateway(settings, SUCCESS_RANDOM),
@@ -175,7 +186,7 @@ async def test_failed_gateway_outcome_sets_failed_and_notifies(
     payment_id = await insert_payment(session_factory)
     receiver = WebhookReceiver()
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         payment_id,
         make_gateway(settings, FAILURE_RANDOM),
@@ -197,10 +208,10 @@ async def test_redelivered_message_does_not_run_gateway_again_or_change_status(
     # Only one gateway run is scripted: a second run would exhaust the script and fail.
     gateway = make_gateway(settings, SUCCESS_RANDOM, sleeper)
     sender = make_webhook_sender(settings, receiver)
-    await complete_payment(session_factory, payment_id, gateway, sender)
+    await finalize_payment(session_factory, payment_id, gateway, sender)
     first = await load_payment(session_factory, payment_id)
 
-    await complete_payment(session_factory, payment_id, gateway, sender)
+    await finalize_payment(session_factory, payment_id, gateway, sender)
 
     second = await load_payment(session_factory, payment_id)
     assert len(sleeper.delays) == 1
@@ -216,12 +227,12 @@ async def test_redelivery_after_webhook_failure_resends_webhook_without_gateway(
     sleeper = SleepRecorder()
     gateway = make_gateway(settings, SUCCESS_RANDOM, sleeper)
     with pytest.raises(WebhookDeliveryError):
-        await complete_payment(
+        await finalize_payment(
             session_factory, payment_id, gateway, make_webhook_sender(settings, receiver)
         )
     receiver.status_code = 200
 
-    await complete_payment(
+    await finalize_payment(
         session_factory, payment_id, gateway, make_webhook_sender(settings, receiver)
     )
 
@@ -237,7 +248,7 @@ async def test_permanent_webhook_failure_raises_and_keeps_gateway_status(
     receiver = WebhookReceiver(status_code=503)
 
     with pytest.raises(WebhookDeliveryError):
-        await complete_payment(
+        await finalize_payment(
             session_factory,
             payment_id,
             make_gateway(settings, FAILURE_RANDOM),
@@ -256,7 +267,7 @@ async def test_missing_payment_is_acknowledged_without_error(
     receiver = WebhookReceiver()
     sleeper = SleepRecorder()
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         uuid.uuid4(),
         make_gateway(settings, SUCCESS_RANDOM, sleeper),
@@ -283,8 +294,8 @@ async def test_concurrent_duplicate_deliveries_store_one_outcome(
     sender = make_webhook_sender(settings, receiver)
 
     await asyncio.gather(
-        complete_payment(session_factory, payment_id, succeeding, sender),
-        complete_payment(session_factory, payment_id, failing, sender),
+        finalize_payment(session_factory, payment_id, succeeding, sender),
+        finalize_payment(session_factory, payment_id, failing, sender),
     )
 
     stored = await load_payment(session_factory, payment_id)
@@ -305,7 +316,7 @@ async def test_already_final_payment_keeps_its_status_and_skips_gateway(
     payment_id = await insert_payment(session_factory, PaymentStatus.FAILED, processed_at)
     sleeper = SleepRecorder()
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         payment_id,
         make_gateway(settings, SUCCESS_RANDOM, sleeper),
@@ -374,7 +385,7 @@ class RaisingGateway:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def process(self, payment: Payment) -> PaymentStatus:
+    async def charge(self, payment: PaymentSnapshot) -> PaymentStatus:
         self.calls += 1
         raise ConnectionError("provider unavailable")
 
@@ -390,7 +401,7 @@ async def test_redelivery_of_a_finished_payment_resends_the_stored_result_to_the
     receiver = WebhookReceiver()
     sleeper = SleepRecorder()
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         payment_id,
         make_gateway(settings, SUCCESS_RANDOM, sleeper),
@@ -419,7 +430,7 @@ async def test_gateway_error_leaves_payment_pending_and_sends_no_webhook(
     gateway = RaisingGateway()
 
     with pytest.raises(ConnectionError, match="provider unavailable"):
-        await complete_payment(
+        await finalize_payment(
             session_factory, payment_id, gateway, make_webhook_sender(settings, receiver)
         )
 
@@ -445,7 +456,7 @@ async def test_worker_that_loses_the_compare_and_set_adopts_the_stored_outcome(
     # This worker's gateway answers "succeeded", but the row is already "failed".
     gateway = make_gateway(settings, SUCCESS_RANDOM, other_worker_finishes_first)  # type: ignore[arg-type]
 
-    await complete_payment(
+    await finalize_payment(
         session_factory, payment_id, gateway, make_webhook_sender(settings, receiver)
     )
 
@@ -468,7 +479,7 @@ async def test_webhook_gets_the_processed_at_that_was_stored(
     payment_id = await insert_payment(session_factory)
     receiver = WebhookReceiver()
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         payment_id,
         make_gateway(settings, SUCCESS_RANDOM),
@@ -480,13 +491,13 @@ async def test_webhook_gets_the_processed_at_that_was_stored(
     assert receiver.bodies[0]["processed_at"] == stored.processed_at.astimezone(UTC).isoformat()
 
 
-async def test_complete_payment_changes_only_the_target_payment(
+async def test_finalize_payment_changes_only_the_target_payment(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     target_id = await insert_payment(session_factory)
     bystander_id = await insert_payment(session_factory)
 
-    await complete_payment(
+    await finalize_payment(
         session_factory,
         target_id,
         make_gateway(settings, SUCCESS_RANDOM),
@@ -666,3 +677,66 @@ async def test_stopping_the_consumer_closes_the_http_client_and_disposes_the_eng
 
     client_close.assert_awaited_once()
     engine_dispose.assert_awaited_once()
+
+
+class BlockingGateway:
+    """Third-party boundary: every charge waits until released, so concurrency is observable."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def charge(self, payment: PaymentSnapshot) -> PaymentStatus:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await self.release.wait()
+        finally:
+            self.in_flight -= 1
+        return PaymentStatus.SUCCEEDED
+
+
+async def wait_for_in_flight(gateway: BlockingGateway, count: int) -> None:
+    deadline = time.monotonic() + DEAD_LETTER_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if gateway.in_flight >= count:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"fewer than {count} payments reached the gateway")
+
+
+async def test_consumer_handles_at_most_prefetch_count_messages_at_the_same_time(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    rabbitmq_url: str,
+    publisher: RabbitBroker,
+) -> None:
+    payment_ids = [await insert_payment(session_factory) for _ in range(5)]
+    gateway = BlockingGateway()
+    consumer = create_app(
+        settings.model_copy(update={"rabbitmq_url": rabbitmq_url, "consumer_prefetch_count": 2}),
+        gateway,
+        make_webhook_sender(settings, WebhookReceiver()),
+    )
+
+    async with consumer.lifespan_context():
+        await consumer.start()
+        for payment_id in payment_ids:
+            await publisher.publish(
+                {"payment_id": str(payment_id)},
+                exchange=payments_exchange,
+                routing_key=ROUTING_KEY,
+                persist=True,
+            )
+        await wait_for_in_flight(gateway, 2)
+        # Bounded negative-proof wait: a third message must NOT be delivered, and absence can
+        # only be shown by giving it time to arrive if the limit were not enforced.
+        await asyncio.sleep(0.5)
+        in_flight_while_blocked = gateway.in_flight
+        gateway.release.set()
+        for payment_id in payment_ids:
+            await wait_for_status(session_factory, payment_id, "succeeded")
+
+    assert in_flight_while_blocked == 2
+    assert gateway.max_in_flight == 2

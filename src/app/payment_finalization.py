@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain import PaymentStatus, transition
+from app.domain import Currency, PaymentSnapshot, PaymentStatus, transition
 from app.gateway import PaymentGateway
 from app.models import Payment
 from app.webhook import WebhookSender
@@ -12,7 +12,7 @@ from app.webhook import WebhookSender
 logger = logging.getLogger(__name__)
 
 
-async def complete_payment(
+async def finalize_payment(
     session_factory: async_sessionmaker[AsyncSession],
     payment_id: uuid.UUID,
     gateway: PaymentGateway,
@@ -31,15 +31,26 @@ async def complete_payment(
         return
 
     if payment.status == PaymentStatus.PENDING:
-        outcome = await gateway.process(payment)
+        outcome = await gateway.charge(_to_snapshot(payment))
         payment = await _store_outcome(session_factory, payment, outcome)
     else:
         logger.info(
             "Payment already %s, skipping gateway payment_id=%s", payment.status, payment_id
         )
 
-    await webhook_sender.send(payment)
+    await webhook_sender.send(_to_snapshot(payment))
     logger.info("Payment completed payment_id=%s status=%s", payment_id, payment.status)
+
+
+def _to_snapshot(payment: Payment) -> PaymentSnapshot:
+    return PaymentSnapshot(
+        id=payment.id,
+        amount=payment.amount,
+        currency=Currency(payment.currency),
+        status=PaymentStatus(payment.status),
+        webhook_url=payment.webhook_url,
+        processed_at=payment.processed_at,
+    )
 
 
 async def _store_outcome(

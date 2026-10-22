@@ -42,9 +42,10 @@ dependency comes back; unpublished outbox rows and unacknowledged messages are p
 `migrate` is one-shot and has no restart policy.
 
 Code layout (`src/app`): `api/` (routes, deps, error handlers), `services.py` (create/get payment),
-`repositories.py`, `domain.py` (`Money`, `Currency`, status state machine), `processing.py`
-(consumer use case), `gateway.py`, `webhook.py`, `messaging/` (`topology.py`, `relay.py`,
-`consumer.py`, `outbox_repository.py`), `models.py`, `config.py`.
+`repositories.py`, `domain.py` (`Money`, `validate_amount`, `Currency`, status state machine),
+`payment_finalization.py` (consumer use case), `gateway.py`, `webhook.py`, `timing.py`,
+`messaging/` (`topology.py`, `relay.py`, `consumer.py`, `outbox_repository.py`), `models.py`,
+`config.py`.
 
 ## Run
 
@@ -54,17 +55,22 @@ docker compose up --build
 ```
 
 Services: `postgres`, `rabbitmq`, `migrate` (applies migrations, then exits), `api`
-(http://localhost:8000, OpenAPI docs at `/docs`), `relay`, `consumer`. Ports published on the host:
-8000 (API), 5672 and 15672 (RabbitMQ); PostgreSQL is not published.
+(http://localhost:8000, OpenAPI docs at `/docs`), `relay`, `consumer`. Ports published on the host,
+all bound to `127.0.0.1` only: 8000 (API), 5672 and 15672 (RabbitMQ); PostgreSQL is not published.
+To reach the API from another machine, change the binding in `docker-compose.yml` on purpose; the
+stack is not hardened for that.
 
 Configuration comes from `.env` (copy of `.env.example`) through compose variable substitution, and
 every variable has a default in `docker-compose.yml`, so the stack also starts without `.env`.
 Compose builds `DATABASE_URL` and `RABBITMQ_URL` from `POSTGRES_*` and `RABBITMQ_*` plus the service
 hostnames; the localhost URLs in `.env.example` are only for running processes on the host. The
-default API key is `change-me`; `API_PORT` (default 8000) sets the host port the API is published on. The app settings are defined in `src/app/config.py`
-(`DATABASE_URL`, `RABBITMQ_URL`, `API_KEY` are required; relay poll interval and batch size,
-`WEBHOOK_MAX_ATTEMPTS`, webhook backoff and timeout, gateway delay range and success rate have defaults).
-Startup fails on invalid values: `RELAY_BATCH_SIZE` and `WEBHOOK_MAX_ATTEMPTS` must be at least 1,
+default API key is `change-me`; `API_PORT` (default 8000) sets the host port the API is published
+on. The defaults `change-me` (API key) and `guest` (RabbitMQ), as well as the PostgreSQL password
+`payments`, are for the local demo only: set real values in `.env` for anything else. The app
+settings are defined in `src/app/config.py` (`DATABASE_URL`, `RABBITMQ_URL`, `API_KEY` are required;
+relay poll interval and batch size, `CONSUMER_PREFETCH_COUNT`, `WEBHOOK_MAX_ATTEMPTS`, webhook
+backoff and timeout, gateway delay range and success rate have defaults). Startup fails on invalid
+values: `RELAY_BATCH_SIZE`, `CONSUMER_PREFETCH_COUNT` and `WEBHOOK_MAX_ATTEMPTS` must be at least 1,
 `GATEWAY_SUCCESS_RATE` must be between 0 and 1, and `GATEWAY_MIN_SECONDS` must not exceed
 `GATEWAY_MAX_SECONDS`.
 
@@ -170,7 +176,7 @@ never echoed back.
 | 404 | `not_found` | Unknown route (the message is the framework's `Not Found`) |
 | 409 | `idempotency_key_conflict` | Key already used with a different payload |
 | 405 | `http_error` | Wrong method for a route; any other framework HTTP error also uses `http_error` with its status and message |
-| 422 | `validation_error` | Invalid body: non-positive amount, more than 2 decimals, amount above 1 000 000 000.00, unknown currency, empty description, non-http(s) `webhook_url`, unknown fields |
+| 422 | `validation_error` | Invalid body: non-positive amount, more than 2 decimals, amount above 1 000 000 000.00, unknown currency, empty description, `metadata` larger than 16 KiB (16384 bytes as compact UTF-8 JSON; message `body.metadata: Value error, Metadata must be at most 16384 bytes as compact JSON`), non-http(s) `webhook_url`, unknown fields |
 
 Unexpected errors produce a plain `500` and are logged; details are not returned to clients.
 
@@ -218,15 +224,28 @@ Open http://localhost:15672 (credentials are `RABBITMQ_USER` / `RABBITMQ_PASSWOR
 ## Design decisions and trade-offs
 
 **Transactional outbox, at-least-once.** The payment row and its outbox row are inserted in one
-transaction, so an event exists if and only if the payment does. The `relay` selects unpublished rows
-with `FOR UPDATE SKIP LOCKED` (several relays can run without blocking or duplicating each other's
-batches), publishes each with publisher confirms and `message_id` = outbox id, and marks it published
-in the same transaction that holds the lock. A crash between the broker confirm and the commit
-publishes the row again, so delivery is at-least-once and the consumer must tolerate duplicates.
-If RabbitMQ is down, rows simply stay unpublished and are retried; the relay reconnects on start.
-The relay publishes with `mandatory=True` on a channel with `on_return_raises`, so a message that no queue
-accepts (for example a missing binding) raises instead of being dropped, and its row stays unpublished
-and is retried.
+transaction, so an event exists if and only if the payment does. The `relay` selects unpublished
+rows with `FOR UPDATE SKIP LOCKED` (several relays can run without blocking or duplicating each
+other's batches), publishes each with publisher confirms and `message_id` = outbox id, and marks it
+published in the same transaction that holds the lock. A crash between the broker confirm and the
+commit publishes the row again, so delivery is at-least-once and the consumer must tolerate
+duplicates. If RabbitMQ is down, rows simply stay unpublished and are retried; the relay reconnects
+on start. The relay publishes with `mandatory=True` on a channel with `on_return_raises`, so a
+message that no queue accepts (for example a missing binding) raises instead of being dropped, and
+its row stays unpublished and is retried. Rows confirmed in a batch are marked published with one
+`UPDATE ... WHERE id = ANY(...)`, and rows confirmed before a failure in the same batch are still
+marked.
+
+**Poison outbox rows.** A row that can never be published would otherwise sit first in order and
+raise on every poll, blocking the rows behind it. When a publish fails, the relay (in a separate
+short transaction) increments `outbox.publish_attempts` and stores a truncated error in
+`outbox.last_error`, and rows are taken in the order `(publish_attempts, created_at, id)`, so a
+failing row falls behind healthy ones. Limitation: there is no maximum number of attempts and no
+quarantine yet; such rows are retried forever, only with lower priority, and each failing poll still
+raises and is logged (one new failing row is demoted per poll). Any exception raised while
+publishing a row counts, not only broker errors (for example a payload that cannot be serialised),
+and `run()` logs it and keeps polling, so one poison row cannot crash-loop the relay. Alert on
+`publish_attempts` growing and inspect `last_error`.
 
 **Idempotent consumer.** `payments.new` carries only `payment_id`. A finished payment skips the
 gateway and only repeats the webhook, so a redelivered message does not charge twice. A message for a
@@ -239,19 +258,26 @@ there is no check-then-insert window. The request fingerprint (SHA-256 of the ca
 original payment, same key and different fingerprint is `409`. The key is global, not per client
 (there is a single static API key).
 
-**Money.** The column is `NUMERIC(18,2)` with a positive check. The domain `Money` value object
-(`Decimal` plus `Currency`) is used for API validation only: it rejects non-positive amounts, more
-than 2 decimal places (rejected, not rounded) and amounts above the maximum, while the ORM model
+**Money.** The column is `NUMERIC(18,2)` with a positive check. The amount rules live in one
+function, `validate_amount` in `domain.py`: it rejects non-positive amounts, more than 2 decimal
+places (rejected, not rounded) and amounts above the maximum. The API schema calls it directly, and
+the domain `Money` value object (`Decimal` plus `Currency`) calls it on construction; the ORM model
 stores a plain numeric column and a currency string. The API accepts and returns amounts as decimal
 strings, never floats. The scale and maximum live once, in `domain.py`.
 
 **Delivery limit and DLQ.** `payments.new` is a quorum queue with `x-delivery-limit`, dead-letter
-exchange `payments.dlx` (fanout) and `at-least-once` dead-lettering. `x-delivery-limit` counts
+exchange `payments.dlx` (fanout) and `at-least-once` dead-lettering. RabbitMQ only honours
+`at-least-once` together with `x-overflow: reject-publish`; without it the broker logs a warning and
+silently falls back to at-most-once (checked on `rabbitmq:4.0`), so the queue sets it. The queue has
+no max-length, so the overflow strategy never triggers and publishers are unaffected; a test
+(`tests/test_relay.py`) checks the queue arguments on a real broker. `x-delivery-limit` counts
 redeliveries, not deliveries, so it is set to 2 to get 3 deliveries in total (the constant
 `QUEUE_MAX_DELIVERY_ATTEMPTS` in `messaging/topology.py`, checked against a real broker in
 `tests/test_relay.py`). It is a queue argument, not a setting: it is independent of
-`WEBHOOK_MAX_ATTEMPTS`, and changing it on an existing queue fails with `PRECONDITION_FAILED`. The consumer nacks with requeue on any exception, which makes
-RabbitMQ redeliver until the limit and then dead-letter.
+`WEBHOOK_MAX_ATTEMPTS`, and changing it on an existing queue fails with `PRECONDITION_FAILED` (so an
+existing `payments.new` created before `x-overflow` was added must be deleted once). The consumer
+nacks with requeue on any exception, which makes RabbitMQ redeliver until the limit and then
+dead-letter.
 
 **Poison messages.** A message whose body is not valid JSON, has no `payment_id`, or has a
 `payment_id` that is not a UUID fails validation before the handler runs. That counts as an
@@ -260,12 +286,13 @@ after 3 deliveries, with its original body. It never loops forever and never tou
 (`tests/test_consumer.py`). A message for a payment that does not exist is the opposite case: it is
 acknowledged and dropped, because redelivery cannot fix a missing row.
 
-**Webhook retry.** Inside one delivery the webhook is posted up to `WEBHOOK_MAX_ATTEMPTS` (3) times with
-exponential backoff plus jitter (`base * 2^(n-1)` + up to `base`, base 1 s). Retried: transport
+**Webhook retry.** Inside one delivery the webhook is posted up to `WEBHOOK_MAX_ATTEMPTS` (3) times
+with exponential backoff plus jitter (`base * 2^(n-1)` + up to `base`, base 1 s). Retried: transport
 errors (connect, timeout) and HTTP 5xx, 408, 429. Not retried: other 4xx and redirects (a permanent
-rejection), which are not retried in-process but still fail the delivery. A failed delivery raises, the message is requeued,
-and the next delivery skips the gateway (status is already final) and tries the webhook again; after
-3 deliveries the message goes to the DLQ. Worst case is therefore up to 9 POSTs to one URL.
+rejection), which are not retried in-process but still fail the delivery. A failed delivery raises,
+the message is requeued, and the next delivery skips the gateway (status is already final) and tries
+the webhook again; after 3 deliveries the message goes to the DLQ. Worst case is therefore up to 9
+POSTs to one URL.
 
 **Trade-off: webhook retries run inside the handler.** The message stays unacknowledged while the
 webhook is retried (at least about 3 s of backoff in the failing case), and a slow receiver holds a
@@ -275,7 +302,14 @@ to a delay queue or a separate webhook outbox.
 
 **Consumer concurrency.** No database transaction or connection is held during the gateway sleep
 (2-5 s); the payment is read, the session is closed, the gateway runs, then a new short transaction
-stores the result.
+stores the result. The consumer's concurrency is the RabbitMQ prefetch count, set explicitly with
+`CONSUMER_PREFETCH_COUNT` (default 10, at least 1): at most that many messages are unacknowledged
+and handled at once per consumer process. Throughput is therefore about prefetch / mean time per
+message; with the default gateway (uniform 2-5 s, mean 3.5 s) that is roughly 10 / 3.5, about 3
+payments per second (about 170 per minute) per consumer process, if webhooks answer quickly. Slow
+webhook receivers lower it, because their retries hold a slot. Scale by raising the prefetch count
+or running more consumer containers (`docker compose up --scale consumer=N`); a message that waits
+in a prefetch buffer is not available to other consumers.
 
 **State machine.** `pending -> succeeded | failed`, defined in one place (`domain.py`); both final
 states are terminal. The result is written with a conditional `UPDATE ... WHERE status = 'pending'`,
@@ -288,6 +322,10 @@ relay duplicate consumed in parallel, or redelivery after a consumer crash mid-c
 the gateway. The database stays correct (first write wins, one final status), but a real gateway
 would need its own idempotency key to avoid a double charge. Webhook receivers can also get the same
 notification more than once (at-least-once), so they should deduplicate by `payment_id`.
+
+**No healthchecks for `relay` and `consumer`.** They serve no port, and a check that only proves the
+process is alive adds nothing over `restart: unless-stopped`. A real signal (last successful poll,
+consumer lag) needs the metrics listed below.
 
 **Other.** Timestamps are UTC and timezone-aware. Payment IDs are random UUIDs. The webhook URL's
 query string is never logged because it may carry tokens. The API key is compared in constant time.
@@ -302,6 +340,8 @@ Configuration is read in one place (`config.py`).
 - SSRF hardening: `webhook_url` is only checked to be http(s); private and loopback address
   blocking, allow-lists and DNS pinning are not implemented.
 - Metrics and tracing (queue depth, outbox lag, DLQ size, correlation ids); only logs exist.
+- Outbox quarantine: a maximum number of publish attempts, after which a row is parked for manual
+  review, and an alert on rows with many `publish_attempts`.
 - Outbox cleanup: published rows are kept forever; add retention or partitioning.
 - A `processing` state (or an advisory lock) to close the duplicate-gateway-call window, and a
   delay-queue based webhook retry that does not hold the message.

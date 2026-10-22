@@ -12,6 +12,7 @@ x-app: &app
     API_KEY: ${API_KEY:-change-me}
     RELAY_POLL_INTERVAL_SECONDS: ${RELAY_POLL_INTERVAL_SECONDS:-1.0}
     RELAY_BATCH_SIZE: ${RELAY_BATCH_SIZE:-50}
+    CONSUMER_PREFETCH_COUNT: ${CONSUMER_PREFETCH_COUNT:-10}
     WEBHOOK_MAX_ATTEMPTS: ${WEBHOOK_MAX_ATTEMPTS:-3}
     WEBHOOK_BACKOFF_BASE_SECONDS: ${WEBHOOK_BACKOFF_BASE_SECONDS:-1.0}
     WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-5.0}
@@ -41,8 +42,8 @@ services:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
@@ -63,7 +64,7 @@ services:
     <<: *app
     command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully

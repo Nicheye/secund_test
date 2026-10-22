@@ -31,6 +31,7 @@ def test_settings_have_documented_defaults() -> None:
         **REQUIRED,
         "relay_poll_interval_seconds": 1.0,
         "relay_batch_size": 50,
+        "consumer_prefetch_count": 10,
         "webhook_max_attempts": 3,
         "webhook_backoff_base_seconds": 1.0,
         "webhook_timeout_seconds": 5.0,
@@ -131,3 +132,22 @@ def test_rejects_gateway_delay_range_when_minimum_exceeds_maximum(
 ) -> None:
     with pytest.raises(ValidationError, match="gateway_min_seconds must not exceed"):
         make_settings(gateway_min_seconds=minimum, gateway_max_seconds=maximum)
+
+
+@pytest.mark.parametrize("count", [1, 10, 100])
+def test_accepts_consumer_prefetch_count_of_at_least_one(count: int) -> None:
+    assert make_settings(consumer_prefetch_count=count).consumer_prefetch_count == count
+
+
+@pytest.mark.parametrize("count", [0, -1])
+def test_rejects_consumer_prefetch_count_below_one(count: int) -> None:
+    with pytest.raises(ValidationError, match="consumer_prefetch_count"):
+        make_settings(consumer_prefetch_count=count)
+
+
+def test_reads_consumer_prefetch_count_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONSUMER_PREFETCH_COUNT", "4")
+
+    assert make_settings().consumer_prefetch_count == 4

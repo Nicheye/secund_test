@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     api_key: str
     relay_poll_interval_seconds: float = 1.0
     relay_batch_size: int = Field(default=50, ge=1)
+    consumer_prefetch_count: int = Field(default=10, ge=1)
     webhook_max_attempts: int = Field(default=3, ge=1)
     webhook_backoff_base_seconds: float = 1.0
     webhook_timeout_seconds: float = 5.0

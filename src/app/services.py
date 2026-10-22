@@ -59,6 +59,8 @@ async def create_payment(
 
     existing = await repositories.get_payment_by_idempotency_key(session, idempotency_key)
     if existing is None:
+        # Unreachable in normal operation: payments are never deleted, so a row that blocked
+        # the insert is still there when it is read back.
         raise RuntimeError("Payment vanished after an idempotency key conflict")
     if existing.request_fingerprint != fingerprint:
         raise IdempotencyKeyConflict(idempotency_key)

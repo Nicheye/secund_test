@@ -223,6 +223,8 @@ async def test_outbox_event_defaults_to_unpublished_with_creation_time(
         stored = await session.get_one(OutboxEvent, event.id)
 
     assert stored.published_at is None
+    assert stored.publish_attempts == 0
+    assert stored.last_error is None
     assert stored.created_at.tzinfo is not None
     assert stored.payload == {"k": "v"}
 
@@ -234,11 +236,11 @@ async def test_outbox_has_partial_index_on_unpublished_rows_only(
         definition = (
             await session.execute(
                 text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
-                {"name": "ix_outbox_unpublished_created_at"},
+                {"name": "ix_outbox_unpublished_order"},
             )
         ).scalar_one()
 
     assert definition == (
-        "CREATE INDEX ix_outbox_unpublished_created_at ON public.outbox "
-        "USING btree (created_at) WHERE (published_at IS NULL)"
+        "CREATE INDEX ix_outbox_unpublished_order ON public.outbox "
+        "USING btree (publish_attempts, created_at, id) WHERE (published_at IS NULL)"
     )

@@ -1,12 +1,12 @@
 import random
+import uuid
 from decimal import Decimal
 
 import pytest
 
 from app.config import Settings
-from app.domain import PaymentStatus
+from app.domain import Currency, PaymentSnapshot, PaymentStatus
 from app.gateway import EmulatedGateway
-from app.models import Payment
 
 
 class ScriptedRandom(random.Random):
@@ -38,8 +38,15 @@ def make_settings(**overrides: float) -> Settings:
     )
 
 
-def make_payment() -> Payment:
-    return Payment(amount=Decimal("1.00"), currency="USD")
+def make_payment() -> PaymentSnapshot:
+    return PaymentSnapshot(
+        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        amount=Decimal("1.00"),
+        currency=Currency.USD,
+        status=PaymentStatus.PENDING,
+        webhook_url="https://client.example/hook",
+        processed_at=None,
+    )
 
 
 @pytest.mark.parametrize(
@@ -65,7 +72,7 @@ async def test_gateway_outcome_flips_exactly_at_the_success_rate(
         rng=ScriptedRandom([0.0, roll]),
     )
 
-    assert await gateway.process(make_payment()) == expected
+    assert await gateway.charge(make_payment()) == expected
 
 
 @pytest.mark.parametrize(
@@ -79,7 +86,7 @@ async def test_gateway_sleeps_once_for_a_delay_between_min_and_max_seconds(
         make_settings(), sleeper=sleeper, rng=ScriptedRandom([uniform_roll, 0.0])
     )
 
-    await gateway.process(make_payment())
+    await gateway.charge(make_payment())
 
     assert sleeper.delays == [pytest.approx(expected_delay)]
 
@@ -92,7 +99,7 @@ async def test_gateway_uses_configured_delay_range() -> None:
         rng=ScriptedRandom([0.5, 0.0]),
     )
 
-    await gateway.process(make_payment())
+    await gateway.charge(make_payment())
 
     assert sleeper.delays == [15.0]
 
@@ -102,7 +109,7 @@ async def test_gateway_with_a_real_random_source_always_sleeps_within_bounds() -
     gateway = EmulatedGateway(make_settings(), sleeper=sleeper, rng=random.Random(7))
 
     for _ in range(200):
-        await gateway.process(make_payment())
+        await gateway.charge(make_payment())
 
     assert len(sleeper.delays) == 200
     assert all(2.0 <= delay <= 5.0 for delay in sleeper.delays)
@@ -119,6 +126,6 @@ async def test_gateway_without_injected_dependencies_uses_asyncio_sleep_and_a_ra
     monkeypatch.setattr("app.gateway.asyncio.sleep", fake_sleep)
     gateway = EmulatedGateway(make_settings(gateway_min_seconds=0, gateway_max_seconds=0))
 
-    outcome = await gateway.process(make_payment())
+    outcome = await gateway.charge(make_payment())
 
     assert outcome in {PaymentStatus.SUCCEEDED, PaymentStatus.FAILED}

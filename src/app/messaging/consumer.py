@@ -6,14 +6,14 @@ from typing import Any
 import httpx
 from faststream import FastStream
 from faststream.middlewares import AckPolicy
-from faststream.rabbit import RabbitBroker
+from faststream.rabbit import Channel, RabbitBroker
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
 from app.db import create_engine, create_session_factory
 from app.gateway import EmulatedGateway, PaymentGateway
 from app.messaging.topology import declare_topology, payments_exchange, payments_new_queue
-from app.processing import complete_payment
+from app.payment_finalization import finalize_payment
 from app.webhook import HttpWebhookSender, WebhookSender
 
 logger = logging.getLogger(__name__)
@@ -38,10 +38,17 @@ def create_app(
 
     # NACK_ON_ERROR requeues the message on any exception. On the quorum queue each requeue
     # counts toward x-delivery-limit, and after the limit RabbitMQ dead-letters the message.
-    @broker.subscriber(payments_new_queue, payments_exchange, ack_policy=AckPolicy.NACK_ON_ERROR)
+    # The prefetch count is the consumer's concurrency: RabbitMQ sends at most this many
+    # unacknowledged messages, and each one is handled in its own task.
+    @broker.subscriber(
+        payments_new_queue,
+        payments_exchange,
+        channel=Channel(prefetch_count=settings.consumer_prefetch_count),
+        ack_policy=AckPolicy.NACK_ON_ERROR,
+    )
     async def consume_new_payment(message: PaymentNewMessage) -> None:
         logger.info("Message received payment_id=%s", message.payment_id)
-        await complete_payment(session_factory, message.payment_id, gateway, webhook_sender)
+        await finalize_payment(session_factory, message.payment_id, gateway, webhook_sender)
 
     async def declare_dead_letter_topology() -> None:
         await declare_topology(broker)

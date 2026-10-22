@@ -5,14 +5,15 @@ import os
 import signal
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
+import aio_pika
 import pytest
 from aio_pika.abc import AbstractIncomingMessage
-from aiormq.exceptions import AMQPError, DeliveryError
+from aiormq.exceptions import AMQPError, ChannelPreconditionFailed, DeliveryError
 from faststream.rabbit import RabbitBroker
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -365,6 +366,179 @@ async def test_publish_batch_skips_published_rows_and_publishes_only_unpublished
     assert untouched.published_at == base
 
 
+# --- failing rows (head-of-line blocking) -----------------------------------------------------
+
+
+async def fetch_outbox_event(
+    session_factory: async_sessionmaker[AsyncSession], event_id: uuid.UUID
+) -> OutboxEvent:
+    async with session_factory() as session:
+        return await session.get_one(OutboxEvent, event_id)
+
+
+def publish_failing_for(
+    broker: RabbitBroker, poison_id: uuid.UUID, error: Exception
+) -> Callable[..., Awaitable[Any]]:
+    real_publish = broker.publish
+
+    async def publish(*args: Any, **kwargs: Any) -> Any:
+        if kwargs["message_id"] == str(poison_id):
+            raise error
+        return await real_publish(*args, **kwargs)
+
+    return publish
+
+
+async def test_a_row_that_cannot_be_published_does_not_block_the_rows_behind_it(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    poison = await insert_event_at(session_factory, base)
+    healthy_first = await insert_event_at(session_factory, base + timedelta(minutes=1))
+    healthy_second = await insert_event_at(session_factory, base + timedelta(minutes=2))
+    relay = make_relay(session_factory, broker)
+
+    with patch.object(broker, "publish", publish_failing_for(broker, poison, AMQPError("nope"))):
+        with pytest.raises(AMQPError):
+            await relay.publish_batch()
+        # The poison row now sorts last: the healthy rows go out before it fails again.
+        with pytest.raises(AMQPError):
+            await relay.publish_batch()
+
+    assert await fetch_published_flags(session_factory) == {
+        poison: False,
+        healthy_first: True,
+        healthy_second: True,
+    }
+    assert [m.message_id for m in await drain_queue(broker)] == [
+        str(healthy_first),
+        str(healthy_second),
+    ]
+
+
+async def test_a_non_broker_publish_error_is_recorded_and_later_rows_still_publish(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    poison = await insert_event_at(session_factory, base)
+    healthy = await insert_event_at(session_factory, base + timedelta(minutes=1))
+    relay = make_relay(session_factory, broker)
+
+    failing_publish = publish_failing_for(broker, poison, TypeError("not serialisable"))
+    with patch.object(broker, "publish", failing_publish):
+        with pytest.raises(TypeError):
+            await relay.publish_batch()
+        with pytest.raises(TypeError):
+            await relay.publish_batch()
+    stored_poison = await fetch_outbox_event(session_factory, poison)
+
+    assert (stored_poison.publish_attempts, stored_poison.last_error) == (
+        2,
+        "TypeError: not serialisable",
+    )
+    assert await fetch_published_flags(session_factory) == {poison: False, healthy: True}
+    assert [m.message_id for m in await drain_queue(broker)] == [str(healthy)]
+
+
+async def test_failed_publish_increments_attempts_and_stores_the_error_of_that_row_only(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    poison = await insert_event_at(session_factory, base)
+    bystander = await insert_event_at(session_factory, base + timedelta(minutes=1))
+    relay = make_relay(session_factory, broker, batch_size=1)
+
+    with (
+        patch.object(
+            broker, "publish", publish_failing_for(broker, poison, AMQPError("channel closed"))
+        ),
+        pytest.raises(AMQPError),
+    ):
+        await relay.publish_batch()
+    stored_poison = await fetch_outbox_event(session_factory, poison)
+    stored_bystander = await fetch_outbox_event(session_factory, bystander)
+
+    assert (stored_poison.publish_attempts, stored_poison.last_error) == (
+        1,
+        "AMQPError: channel closed",
+    )
+    assert (stored_bystander.publish_attempts, stored_bystander.last_error) == (0, None)
+    assert stored_poison.published_at is None
+
+
+async def test_attempts_keep_growing_while_the_row_keeps_failing(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    [event_id] = await insert_outbox_events(session_factory, 1)
+    relay = make_relay(session_factory, broker)
+
+    for _ in range(3):
+        with (
+            patch.object(broker, "publish", side_effect=ConnectionError("refused")),
+            pytest.raises(ConnectionError),
+        ):
+            await relay.publish_batch()
+
+    stored = await fetch_outbox_event(session_factory, event_id)
+    assert (stored.publish_attempts, stored.last_error) == (3, "ConnectionError: refused")
+
+
+async def test_the_stored_error_is_truncated(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    [event_id] = await insert_outbox_events(session_factory, 1)
+
+    with (
+        patch.object(broker, "publish", side_effect=AMQPError("x" * 5000)),
+        pytest.raises(AMQPError),
+    ):
+        await make_relay(session_factory, broker).publish_batch()
+
+    stored = await fetch_outbox_event(session_factory, event_id)
+    assert stored.last_error == ("AMQPError: " + "x" * 5000)[:1000]
+
+
+async def test_a_failing_row_is_published_later_once_the_broker_accepts_it(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    poison = await insert_event_at(session_factory, base)
+    healthy = await insert_event_at(session_factory, base + timedelta(minutes=1))
+    relay = make_relay(session_factory, broker)
+    with patch.object(broker, "publish", publish_failing_for(broker, poison, AMQPError("nope"))):
+        with pytest.raises(AMQPError):
+            await relay.publish_batch()
+        with pytest.raises(AMQPError):
+            await relay.publish_batch()
+
+    published = await relay.publish_batch()
+
+    assert published == 1
+    assert await fetch_published_flags(session_factory) == {poison: True, healthy: True}
+    stored = await fetch_outbox_event(session_factory, poison)
+    assert stored.publish_attempts == 2
+    assert [m.message_id for m in await drain_queue(broker)] == [str(healthy), str(poison)]
+
+
+async def test_rows_with_fewer_failed_attempts_are_published_first_whatever_their_age(
+    session_factory: async_sessionmaker[AsyncSession], broker: RabbitBroker
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    old_but_failing = await insert_event_at(session_factory, base)
+    new_and_healthy = await insert_event_at(session_factory, base + timedelta(minutes=5))
+    async with session_factory() as session:
+        stored = await session.get_one(OutboxEvent, old_but_failing)
+        stored.publish_attempts = 2
+        await session.commit()
+
+    await make_relay(session_factory, broker, batch_size=1).publish_batch()
+
+    assert await fetch_published_flags(session_factory) == {
+        old_but_failing: False,
+        new_and_healthy: True,
+    }
+
+
 # --- run loop --------------------------------------------------------------------------------
 
 WAIT_TIMEOUT_SECONDS = 30.0
@@ -378,6 +552,17 @@ async def wait_until_all_published(session_factory: async_sessionmaker[AsyncSess
             return
         await asyncio.sleep(0.02)
     raise AssertionError("outbox rows were not published in time")
+
+
+async def wait_until_published(
+    session_factory: async_sessionmaker[AsyncSession], event_id: uuid.UUID
+) -> None:
+    deadline = time.monotonic() + WAIT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if (await fetch_published_flags(session_factory)).get(event_id):
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("outbox row was not published in time")
 
 
 async def test_run_publishes_following_full_batches_without_waiting_for_the_poll_interval(
@@ -464,6 +649,29 @@ async def test_run_survives_a_broker_error_and_publishes_on_the_next_poll(
     assert calls == 2
     assert "Outbox publish failed; unpublished rows will be retried" in caplog.text
     assert [m.message_id for m in await drain_queue(broker)] == [str(event_id)]
+
+
+async def test_run_keeps_polling_past_a_non_broker_error_and_publishes_the_rows_behind_it(
+    session_factory: async_sessionmaker[AsyncSession],
+    broker: RabbitBroker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    poison = await insert_event_at(session_factory, base)
+    healthy = await insert_event_at(session_factory, base + timedelta(minutes=1))
+    stop = asyncio.Event()
+
+    with patch.object(
+        broker, "publish", publish_failing_for(broker, poison, TypeError("not serialisable"))
+    ):
+        task = asyncio.create_task(make_relay(session_factory, broker).run(stop))
+        await wait_until_published(session_factory, healthy)
+        stop.set()
+        await asyncio.wait_for(task, timeout=WAIT_TIMEOUT_SECONDS)
+
+    assert "Outbox publish failed; unpublished rows will be retried" in caplog.text
+    assert (await fetch_outbox_event(session_factory, poison)).publish_attempts >= 1
+    assert [m.message_id for m in await drain_queue(broker)] == [str(healthy)]
 
 
 # --- connect_with_retry and run_relay ---------------------------------------------------------
@@ -598,3 +806,32 @@ async def test_run_relay_stops_on_signal_while_rabbitmq_is_unreachable(
 
     assert "Outbox relay started" not in caplog.text
     assert "Outbox relay stopped" in caplog.text
+
+
+async def test_main_queue_is_declared_with_the_arguments_that_make_dead_lettering_at_least_once(
+    broker: RabbitBroker, rabbitmq_url: str
+) -> None:
+    # The broker fixture declared the topology from the application code. RabbitMQ rejects a
+    # re-declaration whose arguments differ, so a successful declaration with exactly these
+    # arguments proves what the broker holds. Without x-overflow
+    # reject-publish it would silently fall back to at-most-once dead-lettering.
+    expected = {
+        "x-queue-type": "quorum",
+        "x-delivery-limit": 2,
+        "x-dead-letter-exchange": "payments.dlx",
+        "x-dead-letter-strategy": "at-least-once",
+        "x-overflow": "reject-publish",
+    }
+    connection = await aio_pika.connect_robust(rabbitmq_url)
+    try:
+        matching_channel = await connection.channel()
+        await matching_channel.declare_queue("payments.new", durable=True, arguments=expected)
+
+        without_overflow = {k: v for k, v in expected.items() if k != "x-overflow"}
+        mismatch_channel = await connection.channel()
+        with pytest.raises(ChannelPreconditionFailed):
+            await mismatch_channel.declare_queue(
+                "payments.new", durable=True, arguments=without_overflow
+            )
+    finally:
+        await connection.close()

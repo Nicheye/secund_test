@@ -1,4 +1,6 @@
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -42,22 +44,42 @@ def transition(current: PaymentStatus, target: PaymentStatus) -> PaymentStatus:
     return target
 
 
+def validate_amount(amount: Decimal) -> Decimal:
+    """Returns the amount if it is a valid payment amount, otherwise raises InvalidMoney.
+
+    Exact: values with more than two decimal places are rejected, never rounded. The rules do
+    not depend on the currency yet.
+    """
+    if not isinstance(amount, Decimal):
+        raise InvalidMoney(f"Amount must be a Decimal, got {type(amount).__name__}")
+    if not amount.is_finite():
+        raise InvalidMoney("Amount must be a finite number")
+    if amount <= 0:
+        raise InvalidMoney("Amount must be positive")
+    # The range is checked before quantize(), which raises InvalidOperation on huge values.
+    if amount > MAX_AMOUNT:
+        raise InvalidMoney(f"Amount must not exceed {MAX_AMOUNT}")
+    if amount != amount.quantize(AMOUNT_SCALE):
+        raise InvalidMoney("Amount must have at most 2 decimal places")
+    return amount
+
+
 @dataclass(frozen=True)
 class Money:
-    """Amount is exact: values with more than two decimal places are rejected, never rounded."""
-
     amount: Decimal
     currency: Currency
 
     def __post_init__(self) -> None:
-        if not isinstance(self.amount, Decimal):
-            raise InvalidMoney(f"Amount must be a Decimal, got {type(self.amount).__name__}")
-        if not self.amount.is_finite():
-            raise InvalidMoney("Amount must be a finite number")
-        if self.amount <= 0:
-            raise InvalidMoney("Amount must be positive")
-        # The range is checked before quantize(), which raises InvalidOperation on huge values.
-        if self.amount > MAX_AMOUNT:
-            raise InvalidMoney(f"Amount must not exceed {MAX_AMOUNT}")
-        if self.amount != self.amount.quantize(AMOUNT_SCALE):
-            raise InvalidMoney("Amount must have at most 2 decimal places")
+        validate_amount(self.amount)
+
+
+@dataclass(frozen=True)
+class PaymentSnapshot:
+    """What the payment gateway and the webhook sender need to know about a payment."""
+
+    id: uuid.UUID
+    amount: Decimal
+    currency: Currency
+    status: PaymentStatus
+    webhook_url: str
+    processed_at: datetime | None

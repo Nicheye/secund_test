@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     Text,
     func,
@@ -55,9 +56,12 @@ class Payment(Base):
 class OutboxEvent(Base):
     __tablename__ = "outbox"
     __table_args__ = (
+        # Serves the relay's ordering: rows that failed to publish sort after healthy ones.
         Index(
-            "ix_outbox_unpublished_created_at",
+            "ix_outbox_unpublished_order",
+            "publish_attempts",
             "created_at",
+            "id",
             postgresql_where=text("published_at IS NULL"),
         ),
     )
@@ -72,3 +76,8 @@ class OutboxEvent(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    publish_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # Nullable: empty until a publish fails.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import uuid
 
 from aiormq.exceptions import AMQPError
 from faststream.rabbit import Channel, RabbitBroker
@@ -9,13 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
 from app.db import create_engine, create_session_factory
-from app.messaging.outbox_repository import lock_unpublished_events, mark_published
+from app.messaging.outbox_repository import (
+    lock_unpublished_events,
+    mark_published,
+    record_publish_failure,
+)
 from app.messaging.topology import ROUTING_KEY, declare_topology, payments_exchange
 
 logger = logging.getLogger(__name__)
 
 CONNECT_RETRY_SECONDS = 2.0
 BROKER_ERRORS = (AMQPError, ConnectionError, TimeoutError)
+LAST_ERROR_MAX_LENGTH = 1000
 
 
 def create_broker(rabbitmq_url: str) -> RabbitBroker:
@@ -52,13 +58,17 @@ class Relay:
     async def publish_batch(self) -> int:
         """Publish one batch; returns how many rows were published and marked.
 
-        If a publish fails, rows already confirmed in this batch are still marked and committed,
-        then the error is re-raised. The failed row and the rest stay unpublished.
+        If a publish fails, rows already confirmed in this batch are still marked and committed.
+        The failed row stays unpublished with its attempt count raised and the error stored (in
+        a separate short transaction, after the batch transaction released its lock), so it sorts
+        behind healthy rows from then on; the error is then re-raised. Any exception counts, not
+        only broker errors: an unserialisable payload is as permanent as a missing binding.
         """
-        published = 0
+        confirmed_ids: list[uuid.UUID] = []
+        failure: tuple[uuid.UUID, Exception] | None = None
         async with self._session_factory() as session:
-            try:
-                for event in await lock_unpublished_events(session, self._batch_size):
+            for event in await lock_unpublished_events(session, self._batch_size):
+                try:
                     await self._broker.publish(
                         event.payload,
                         exchange=payments_exchange,
@@ -67,19 +77,30 @@ class Relay:
                         persist=True,
                         mandatory=True,
                     )
-                    await mark_published(session, event.id)
-                    published += 1
-            except BROKER_ERRORS:
-                await session.commit()
-                raise
+                except Exception as error:  # any failure demotes this row, see below
+                    failure = (event.id, error)
+                    break
+                confirmed_ids.append(event.id)
+            if confirmed_ids:
+                await mark_published(session, confirmed_ids)
             await session.commit()
-        return published
+        if failure is not None:
+            await self._record_failure(*failure)
+            raise failure[1]
+        return len(confirmed_ids)
+
+    async def _record_failure(self, event_id: uuid.UUID, error: Exception) -> None:
+        description = f"{type(error).__name__}: {error}"[:LAST_ERROR_MAX_LENGTH]
+        async with self._session_factory() as session:
+            await record_publish_failure(session, event_id, description)
+            await session.commit()
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
                 published = await self.publish_batch()
-            except BROKER_ERRORS:
+            except Exception:
+                # Not only broker errors: a poison row must not crash-loop the relay.
                 logger.exception("Outbox publish failed; unpublished rows will be retried")
                 published = 0
             if published == self._batch_size:

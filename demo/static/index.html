@@ -162,7 +162,7 @@ pre { margin: 6px 0 0; padding: 10px 12px; background: var(--surface-2); border:
   <h1>Демо платёжного сервиса</h1>
   <span id="conn" role="status" aria-live="polite"><span class="dot"></span><span id="connText">Подключение к потоку событий…</span></span>
   <nav aria-label="Внешние инструменты">
-    <a id="docsLink" href="#" target="_blank" rel="noopener noreferrer">Документация API</a>
+    <a id="docsLink" hidden target="_blank" rel="noopener noreferrer">Документация API</a>
     <a id="mqLink" href="#" target="_blank" rel="noopener noreferrer">RabbitMQ UI</a>
   </nav>
 </header>
@@ -246,7 +246,7 @@ pre { margin: 6px 0 0; padding: 10px 12px; background: var(--surface-2); border:
         </div>
       </div>
       <div class="list" id="hookList" aria-live="polite" aria-relevant="additions"></div>
-      <p class="hint hookfoot" id="failHint" hidden>/hook/fail отвечает 500: в каждой доставке три попытки, а после трёх доставок сообщение уходит в DLQ (до 9 событий на платёж).</p>
+      <p class="hint hookfoot" id="failHint" hidden>/hook/fail отвечает 500: сервис обычно делает три попытки с паузами, после чего сообщение уходит в DLQ (обычно три события на платёж).</p>
     </section>
   </div>
 
@@ -265,7 +265,7 @@ pre { margin: 6px 0 0; padding: 10px 12px; background: var(--surface-2); border:
 <script>
 "use strict";
 const S = {
-  cfg: { api_key: "", webhook_url_ok: "", webhook_url_fail: "", api_docs_url: "", rabbitmq_ui_url: "" },
+  cfg: { api_key: "", webhook_url_ok: "", webhook_url_fail: "", api_url: "", api_docs_url: null, rabbitmq_ui_url: "" },
   payments: new Map(),   // id -> payment record, insertion order = creation order
   last: null,            // {key, body} of the last create request, for the "same key" scenarios
   log: [], hooks: new Map(), hookEls: new Map(), focusPid: null,
@@ -363,7 +363,7 @@ const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
 };
-function apiOrigin() { try { return new URL(S.cfg.api_docs_url).origin; } catch { return "http://localhost:8000"; } }
+function apiOrigin() { try { return new URL(S.cfg.api_url).origin; } catch { return "http://localhost:8000"; } }
 const errCode = (r) => (r.json && r.json.error && r.json.error.code) || "";
 // Russian explanation for a known API error code, or for a transport failure
 const explain = (r) => (r.error ? NETWORK_RU : ERROR_RU[errCode(r)] || "");
@@ -666,7 +666,7 @@ function showHookEmpty() {
     ? h("div", { class: "empty" }, h("strong", {}, "Под фильтр ничего не попало"), h("p", {}, "Отключите «Только эта сессия», чтобы увидеть все полученные вебхуки."))
     : h("div", { class: "empty" }, h("strong", {}, "Вебхуков пока нет"),
         h("p", {}, "Потребитель вызывает URL вебхука через 2–5 секунд после создания платежа."),
-        h("p", {}, "С шаблоном «Успешный получатель» придёт одно событие с ответом 200. Если выбрать «Сбойный получатель», он ответит 500: в каждой доставке три попытки, а после трёх доставок сообщение уйдёт в DLQ (до 9 событий).")));
+        h("p", {}, "С шаблоном «Успешный получатель» придёт одно событие с ответом 200. Если выбрать «Сбойный получатель», он ответит 500: сервис обычно делает три попытки с паузами, после чего сообщение уходит в DLQ (обычно три события).")));
 }
 function clearHooksLocal() {
   S.hooks.clear(); S.hookEls.clear(); $("hookList").replaceChildren(); $("failHint").hidden = true; applyHookView();
@@ -686,12 +686,12 @@ function focusPayment(pid) {
 
 // ---------- init ----------
 async function init() {
-  $("docsLink").addEventListener("click", (e) => { if (!S.cfg.api_docs_url) e.preventDefault(); });
   renderScenarios(); renderPayments(); applyHookView(); logEmpty();
   try {
     const res = await fetch("/config"); S.cfg = { ...S.cfg, ...(await res.json()) };
   } catch { /* the page still works with manual input */ }
-  $("docsLink").href = S.cfg.api_docs_url || "#"; $("mqLink").href = S.cfg.rabbitmq_ui_url || "#";
+  if (S.cfg.api_docs_url) { $("docsLink").href = S.cfg.api_docs_url; $("docsLink").hidden = false; }
+  $("mqLink").href = S.cfg.rabbitmq_ui_url || "#";
   $("apiKey").value = store.get("demo.apiKey") ?? S.cfg.api_key;
   $("webhook").value = S.cfg.webhook_url_ok;
   $("idem").value = newKey();

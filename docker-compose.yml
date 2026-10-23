@@ -1,5 +1,6 @@
 # Works out of the box: every variable below has a default, so `docker compose up --build`
 # needs no .env. To override anything, run `cp .env.example .env` and edit it.
+# The demo service is optional: it starts only with `--profile demo`.
 # Connection URLs are built here from service hostnames; the localhost URLs in .env.example
 # are for running the processes on the host.
 
@@ -10,6 +11,7 @@ x-app: &app
     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
     RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
     API_KEY: ${API_KEY:-change-me}
+    API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
     RELAY_POLL_INTERVAL_SECONDS: ${RELAY_POLL_INTERVAL_SECONDS:-1.0}
     RELAY_BATCH_SIZE: ${RELAY_BATCH_SIZE:-50}
     CONSUMER_PREFETCH_COUNT: ${CONSUMER_PREFETCH_COUNT:-10}
@@ -69,7 +71,22 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')"]
+      # Authenticated probe: the API has no unauthenticated route. A 404 payment_not_found
+      # means the app, the key check and the database session all work.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, os, urllib.error, urllib.request
+          request = urllib.request.Request(
+              "http://localhost:8000/api/v1/payments/00000000-0000-0000-0000-000000000000",
+              headers={"X-API-Key": os.environ["API_KEY"]},
+          )
+          try:
+              urllib.request.urlopen(request)
+          except urllib.error.HTTPError as error:
+              assert error.code == 404 and json.load(error)["error"]["code"] == "payment_not_found"
       interval: 10s
       timeout: 5s
       retries: 5
@@ -97,6 +114,7 @@ services:
     restart: unless-stopped
 
   demo:
+    profiles: ["demo"]
     build:
       context: .
       dockerfile: demo/Dockerfile
@@ -106,6 +124,7 @@ services:
       DEFAULT_API_KEY: ${API_KEY:-change-me}
       PUBLIC_API_URL: http://localhost:${API_PORT:-8000}
       RABBITMQ_UI_URL: http://localhost:15672
+      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
     ports:
       - "127.0.0.1:${DEMO_PORT:-8090}:9100"
     depends_on:

@@ -123,9 +123,18 @@ async def test_config_returns_urls_built_from_settings() -> None:
         "api_key": "secret-from-env",
         "webhook_url_ok": "http://hooks:9100/hook",
         "webhook_url_fail": "http://hooks:9100/hook/fail",
-        "api_docs_url": "http://localhost:8080/docs",
+        "api_url": "http://localhost:8080",
+        "api_docs_url": None,
         "rabbitmq_ui_url": "http://localhost:15999",
     }
+
+
+async def test_config_returns_the_docs_url_only_when_api_docs_are_enabled() -> None:
+    settings = make_settings(public_api_url="http://localhost:8080", api_docs_enabled=True)
+
+    response = await request_demo("GET", "/config", settings=settings)
+
+    assert response.json()["api_docs_url"] == "http://localhost:8080/docs"
 
 
 def test_read_settings_uses_defaults_when_environment_is_empty(
@@ -138,6 +147,7 @@ def test_read_settings_uses_defaults_when_environment_is_empty(
         "RABBITMQ_UI_URL",
         "DEMO_HOOK_BASE_URL",
         "EVENT_BUFFER_SIZE",
+        "API_DOCS_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -151,6 +161,26 @@ def test_read_settings_uses_defaults_when_environment_is_empty(
         hook_base_url="http://demo:9100",
         event_buffer_size=200,
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("true", True),
+        ("false", False),
+        ("TRUE", False),
+        ("1", False),
+        ("yes", False),
+        ("0", False),
+        ("", False),
+    ],
+)
+def test_read_settings_reads_api_docs_enabled_flag(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv("API_DOCS_ENABLED", raw)
+
+    assert read_settings().api_docs_enabled is expected
 
 
 def test_read_settings_reads_values_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:

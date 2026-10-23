@@ -350,14 +350,20 @@ async def wait_for_dead_letter(broker: RabbitBroker) -> bytes:
     raise AssertionError("message was not dead-lettered in time")
 
 
-async def test_message_is_dead_lettered_after_three_failed_deliveries(
+@pytest.mark.parametrize(
+    ("webhook_status", "expected_posts"),
+    [(500, 3), (503, 3), (429, 3), (400, 1), (404, 1)],
+)
+async def test_failed_webhook_is_rejected_without_requeue_and_dead_lettered_at_once(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
     rabbitmq_url: str,
     publisher: RabbitBroker,
+    webhook_status: int,
+    expected_posts: int,
 ) -> None:
     payment_id = await insert_payment(session_factory)
-    receiver = WebhookReceiver(status_code=500)
+    receiver = WebhookReceiver(status_code=webhook_status)
     consumer_settings = settings.model_copy(update={"rabbitmq_url": rabbitmq_url})
     consumer = create_app(
         consumer_settings,
@@ -372,10 +378,11 @@ async def test_message_is_dead_lettered_after_three_failed_deliveries(
             body, exchange=payments_exchange, routing_key=ROUTING_KEY, persist=True
         )
         dead_lettered = await wait_for_dead_letter(publisher)
+        await wait_for_empty_queue(publisher)
 
     assert json.loads(dead_lettered) == body
-    # 3 deliveries, each making 3 webhook attempts.
-    assert len(receiver.bodies) == 9
+    # One delivery only: a requeue would repeat the POSTs.
+    assert len(receiver.bodies) == expected_posts
     assert (await load_payment(session_factory, payment_id)).status == "succeeded"
 
 
@@ -524,7 +531,13 @@ async def wait_for_status(
 
 
 async def wait_for_empty_queue(broker: RabbitBroker) -> None:
-    """A message that is acknowledged leaves the queue (unacknowledged ones still count)."""
+    """Wait until no ready message is left in the queue.
+
+    The AMQP declare-ok count covers ready messages only, so a delivered but not yet
+    acknowledged message is not visible here. Callers therefore wait for an observable
+    outcome (payment status, dead letter) first and use this to catch a message that was
+    requeued instead of settled.
+    """
     deadline = time.monotonic() + DEAD_LETTER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         queue = await broker.declare_queue(payments_new_queue)

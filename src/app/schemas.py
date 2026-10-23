@@ -32,7 +32,7 @@ class CreatePaymentRequest(BaseModel):
 
     amount: Annotated[Decimal, AfterValidator(validate_amount)]
     currency: Currency
-    description: str = Field(min_length=1, max_length=MAX_DESCRIPTION_LENGTH)
+    description: str = Field(default="", max_length=MAX_DESCRIPTION_LENGTH)
     metadata: Annotated[dict[str, Any], AfterValidator(_validate_metadata_size)] = Field(
         default_factory=dict
     )

@@ -4,6 +4,9 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# The demo service sits behind a compose profile; run.sh always wants it.
+export COMPOSE_PROFILES=demo
+
 STATE_FILE=".run.env"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-180}"
 DEFAULT_API_PORT=8000
@@ -157,10 +160,12 @@ ensure_env_file() {
   info "Created .env from .env.example."
 }
 
+# The key the running api container really uses (Compose resolved .env, the shell environment
+# and quoting rules); asking the container avoids re-implementing that parsing here.
 api_key() {
   local key
-  key=$(env_file_value API_KEY)
-  printf '%s' "${key:-change-me}"
+  key=$(docker compose exec -T api printenv API_KEY 2>/dev/null) || key=""
+  printf '%s' "${key:-<unavailable: the api container is not running>}"
 }
 
 rabbit_credentials() {
@@ -170,6 +175,17 @@ rabbit_credentials() {
   printf '%s / %s' "${user:-guest}" "${pass:-guest}"
 }
 
+# Printed only when the docs routes are enabled (they are public, for local development).
+docs_summary_line() {
+  case "$(docker compose exec -T api printenv API_DOCS_ENABLED 2>/dev/null || true)" in
+  true)
+    printf '  %sAPI docs%s     http://127.0.0.1:%s/docs  (public, API_DOCS_ENABLED=true)' \
+      "$BOLD" "$RESET" "$API_PORT"
+    ;;
+  *) printf '  %sAPI docs%s     disabled (set API_DOCS_ENABLED=true in .env to enable /docs)' "$BOLD" "$RESET" ;;
+  esac
+}
+
 print_summary() {
   cat <<EOF
 
@@ -177,7 +193,7 @@ ${GREEN}${BOLD}Payment service is up.${RESET}
 
   ${BOLD}Demo UI${RESET}      http://127.0.0.1:${DEMO_PORT}/
   ${BOLD}API base URL${RESET} http://127.0.0.1:${API_PORT}/api/v1
-  ${BOLD}API docs${RESET}     http://127.0.0.1:${API_PORT}/docs
+$(docs_summary_line)
   ${BOLD}RabbitMQ UI${RESET}  http://127.0.0.1:${RABBITMQ_UI_PORT}  (login: $(rabbit_credentials))
   ${BOLD}API key${RESET}      $(api_key)   (send as the X-API-Key header)
 
@@ -206,8 +222,14 @@ open_browser() {
   fi
 }
 
-url_ok() {
-  curl -fsS -o /dev/null --max-time 3 "$1" >/dev/null 2>&1
+# Health status of a service as reported by Docker from the container's own healthcheck
+# (empty if the container does not exist yet). The api healthcheck is authenticated inside
+# the container with the key Compose actually gave it, so run.sh never re-parses .env.
+service_health() {
+  local id
+  id=$(docker compose ps -q "$1" 2>/dev/null | head -n 1) || return 0
+  [ -n "$id" ] || return 0
+  docker inspect -f '{{.State.Health.Status}}' "$id" 2>/dev/null || true
 }
 
 # Prints a failure reason if the one-shot migrate container finished with an error.
@@ -229,17 +251,15 @@ on_interrupt() {
 }
 
 wait_until_ready() {
-  local api_url="http://127.0.0.1:${API_PORT}/openapi.json"
-  local demo_url="http://127.0.0.1:${DEMO_PORT}/health"
   local start now elapsed reason spin='|/-\' i=0 api_ok demo_ok
   start=$(date +%s)
   trap on_interrupt INT TERM
   while true; do
-    api_ok="waiting"
-    demo_ok="waiting"
-    url_ok "$api_url" && api_ok="ready"
-    url_ok "$demo_url" && demo_ok="ready"
-    if [ "$api_ok" = ready ] && [ "$demo_ok" = ready ]; then
+    api_ok="$(service_health api)"
+    demo_ok="$(service_health demo)"
+    api_ok="${api_ok:-waiting}"
+    demo_ok="${demo_ok:-waiting}"
+    if [ "$api_ok" = healthy ] && [ "$demo_ok" = healthy ]; then
       printf '\r\033[K'
       trap - INT TERM
       return 0

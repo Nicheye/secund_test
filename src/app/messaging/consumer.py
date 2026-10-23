@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 from faststream import FastStream
+from faststream.exceptions import RejectMessage
 from faststream.middlewares import AckPolicy
 from faststream.rabbit import Channel, RabbitBroker
 from pydantic import BaseModel
@@ -14,7 +15,7 @@ from app.db import create_engine, create_session_factory
 from app.gateway import EmulatedGateway, PaymentGateway
 from app.messaging.topology import declare_topology, payments_exchange, payments_new_queue
 from app.payment_finalization import finalize_payment
-from app.webhook import HttpWebhookSender, WebhookSender
+from app.webhook import HttpWebhookSender, WebhookDeliveryError, WebhookSender
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,9 @@ def create_app(
 
     # NACK_ON_ERROR requeues the message on any exception. On the quorum queue each requeue
     # counts toward x-delivery-limit, and after the limit RabbitMQ dead-letters the message.
+    # A webhook failure is the exception to that: the sender has already made all its attempts
+    # (or got a permanent 4xx), so the handler rejects without requeue and RabbitMQ
+    # dead-letters the message right away.
     # The prefetch count is the consumer's concurrency: RabbitMQ sends at most this many
     # unacknowledged messages, and each one is handled in its own task.
     @broker.subscriber(
@@ -48,7 +52,15 @@ def create_app(
     )
     async def consume_new_payment(message: PaymentNewMessage) -> None:
         logger.info("Message received payment_id=%s", message.payment_id)
-        await finalize_payment(session_factory, message.payment_id, gateway, webhook_sender)
+        try:
+            await finalize_payment(session_factory, message.payment_id, gateway, webhook_sender)
+        except WebhookDeliveryError as error:
+            logger.error(
+                "Webhook not delivered, dead-lettering message payment_id=%s reason=%s",
+                message.payment_id,
+                error,
+            )
+            raise RejectMessage from error
 
     async def declare_dead_letter_topology() -> None:
         await declare_topology(broker)

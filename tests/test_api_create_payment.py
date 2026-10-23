@@ -127,7 +127,6 @@ async def test_stores_neither_payment_nor_outbox_event_when_outbox_insert_fails(
         ("currency", "GBP"),
         ("currency", "usd"),
         ("currency", ""),
-        ("description", ""),
         ("webhook_url", "ftp://merchant.example.com/hook"),
         ("webhook_url", "javascript:alert(1)"),
         ("webhook_url", "not a url"),
@@ -152,7 +151,7 @@ async def test_rejects_create_with_422_when_field_is_invalid(
     assert await count_rows(session_factory, OutboxEvent) == 0
 
 
-@pytest.mark.parametrize("missing_field", ["amount", "currency", "description", "webhook_url"])
+@pytest.mark.parametrize("missing_field", ["amount", "currency", "webhook_url"])
 async def test_rejects_create_with_422_when_required_field_is_missing(
     client: httpx.AsyncClient, missing_field: str
 ) -> None:
@@ -424,8 +423,8 @@ async def test_rejects_metadata_over_sixteen_kibibytes_with_422_naming_metadata(
     assert await fetch_payments(session_factory) == []
 
 
-@pytest.mark.parametrize("description", ["x", "Order 42", "d" * 1000, "Заказ", "line\nbreak"])
-async def test_accepts_description_from_one_to_one_thousand_characters(
+@pytest.mark.parametrize("description", ["", "x", "Order 42", "d" * 1000, "Заказ", "line\nbreak"])
+async def test_accepts_description_from_zero_to_one_thousand_characters(
     client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession], description: str
 ) -> None:
     response = await client.post(
@@ -437,8 +436,35 @@ async def test_accepts_description_from_one_to_one_thousand_characters(
     assert payment.description == description
 
 
-@pytest.mark.parametrize("description", ["", "d" * 1001, 42, None, ["a"]])
-async def test_rejects_create_with_422_when_description_is_empty_too_long_or_not_text(
+async def test_stores_and_returns_an_empty_description_when_it_is_omitted(
+    client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    body = {key: value for key, value in VALID_BODY.items() if key != "description"}
+
+    response = await client.post(PAYMENTS_URL, json=body, headers=headers())
+
+    assert response.status_code == 202
+    [payment] = await fetch_payments(session_factory)
+    assert payment.description == ""
+    fetched = await client.get(f"{PAYMENTS_URL}/{response.json()['payment_id']}", headers=headers())
+    assert fetched.json()["description"] == ""
+
+
+async def test_omitted_and_empty_description_are_the_same_payload_for_idempotency(
+    client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    omitted = {key: value for key, value in VALID_BODY.items() if key != "description"}
+
+    first = await client.post(PAYMENTS_URL, json=omitted, headers=headers())
+    second = await client.post(PAYMENTS_URL, json={**omitted, "description": ""}, headers=headers())
+
+    assert second.status_code == 202
+    assert second.json() == first.json()
+    assert await count_rows(session_factory, Payment) == 1
+
+
+@pytest.mark.parametrize("description", ["d" * 1001, 42, None, ["a"]])
+async def test_rejects_create_with_422_when_description_is_too_long_or_not_text(
     client: httpx.AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
     description: Any,
@@ -608,7 +634,7 @@ async def test_422_message_lists_every_missing_field(client: httpx.AsyncClient) 
         "error": {
             "code": "validation_error",
             "message": "body.amount: Field required; body.currency: Field required; "
-            "body.description: Field required; body.webhook_url: Field required",
+            "body.webhook_url: Field required",
         }
     }
 
@@ -616,7 +642,7 @@ async def test_422_message_lists_every_missing_field(client: httpx.AsyncClient) 
 async def test_422_message_does_not_echo_the_rejected_input(client: httpx.AsyncClient) -> None:
     response = await client.post(
         PAYMENTS_URL,
-        json={**VALID_BODY, "description": "", "currency": "SECRET-CURRENCY"},
+        json={**VALID_BODY, "currency": "SECRET-CURRENCY"},
         headers=headers(),
     )
 

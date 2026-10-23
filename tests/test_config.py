@@ -29,6 +29,7 @@ def test_settings_have_documented_defaults() -> None:
 
     assert settings.model_dump() == {
         **REQUIRED,
+        "api_docs_enabled": False,
         "relay_poll_interval_seconds": 1.0,
         "relay_batch_size": 50,
         "consumer_prefetch_count": 10,
@@ -151,3 +152,29 @@ def test_reads_consumer_prefetch_count_from_the_environment(
     monkeypatch.setenv("CONSUMER_PREFETCH_COUNT", "4")
 
     assert make_settings().consumer_prefetch_count == 4
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
+def test_reads_api_docs_enabled_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv("API_DOCS_ENABLED", raw)
+
+    assert make_settings().api_docs_enabled is expected
+
+
+@pytest.mark.parametrize(
+    "raw", ["1", "0", "yes", "no", "on", "off", "t", "y", "True", "TRUE", " true", ""]
+)
+def test_rejects_api_docs_enabled_spellings_other_than_true_or_false(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("API_DOCS_ENABLED", raw)
+
+    with pytest.raises(ValidationError, match="api_docs_enabled"):
+        make_settings()
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_accepts_api_docs_enabled_given_as_a_bool(value: bool) -> None:
+    assert make_settings(api_docs_enabled=value).api_docs_enabled is value

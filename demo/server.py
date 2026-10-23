@@ -33,6 +33,7 @@ class DemoSettings:
     rabbitmq_ui_url: str
     hook_base_url: str
     event_buffer_size: int
+    api_docs_enabled: bool = False
     keepalive_seconds: float = 15.0
 
 
@@ -44,6 +45,7 @@ def read_settings() -> DemoSettings:
         rabbitmq_ui_url=os.environ.get("RABBITMQ_UI_URL", "http://localhost:15672"),
         hook_base_url=os.environ.get("DEMO_HOOK_BASE_URL", "http://demo:9100"),
         event_buffer_size=int(os.environ.get("EVENT_BUFFER_SIZE", "200")),
+        api_docs_enabled=os.environ.get("API_DOCS_ENABLED", "false") == "true",
     )
 
 
@@ -146,12 +148,15 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/config")
-    async def config() -> dict[str, str]:
+    async def config() -> dict[str, str | None]:
         return {
             "api_key": demo_settings.default_api_key,
             "webhook_url_ok": f"{demo_settings.hook_base_url}{HOOK_PATH}",
             "webhook_url_fail": f"{demo_settings.hook_base_url}{FAILING_HOOK_PATH}",
-            "api_docs_url": f"{demo_settings.public_api_url}/docs",
+            "api_url": demo_settings.public_api_url,
+            "api_docs_url": (
+                f"{demo_settings.public_api_url}/docs" if demo_settings.api_docs_enabled else None
+            ),
             "rabbitmq_ui_url": demo_settings.rabbitmq_ui_url,
         }
 

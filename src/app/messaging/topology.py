@@ -8,10 +8,11 @@ payments_exchange = RabbitExchange("payments", type=ExchangeType.DIRECT, durable
 # otherwise have to be bound to.
 payments_dlx = RabbitExchange("payments.dlx", type=ExchangeType.FANOUT, durable=True)
 
-# How many times RabbitMQ delivers a message before dead-lettering it. This is a queue
-# argument, deliberately not a setting and separate from WEBHOOK_MAX_ATTEMPTS (POSTs inside one
-# delivery). Changing queue arguments on an existing queue fails with PRECONDITION_FAILED, so
-# changing this needs a new queue (or deleting `payments.new`).
+# How many times RabbitMQ delivers a message before dead-lettering it after errors other than a
+# webhook failure (a failed webhook is rejected right away, see the consumer). This is a queue
+# argument, deliberately not a setting and separate from WEBHOOK_MAX_ATTEMPTS (webhook POSTs).
+# Changing queue arguments on an existing queue fails with PRECONDITION_FAILED, so changing
+# this needs a new queue (or deleting `payments.new`).
 QUEUE_MAX_DELIVERY_ATTEMPTS = 3
 
 # Quorum queue: x-delivery-limit counts redeliveries, not deliveries, so the limit is one less

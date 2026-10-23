@@ -36,8 +36,8 @@ the client by webhook. Stack: FastAPI + Pydantic v2, SQLAlchemy 2.0 (async), Pos
 
 Processes (one compose service each): `api` (HTTP), `relay` (outbox -> RabbitMQ), `consumer`
 (`payments.new` -> gateway -> DB -> webhook), `migrate` (runs `alembic upgrade head` once and
-exits). Every long-running service (`postgres`, `rabbitmq`, `api`, `relay`, `consumer`) is
-`restart: unless-stopped`, so the relay and consumer recover from crashes and a restarted
+exits), `demo` (local test helper, see [Demo UI](#demo-ui); not part of the payment service). Every long-running service (`postgres`, `rabbitmq`, `api`, `relay`, `consumer`) is
+`restart: unless-stopped` (as is `demo`), so the relay and consumer recover from crashes and a restarted
 dependency comes back; unpublished outbox rows and unacknowledged messages are picked up again.
 `migrate` is one-shot and has no restart policy.
 
@@ -45,9 +45,41 @@ Code layout (`src/app`): `api/` (routes, deps, error handlers), `services.py` (c
 `repositories.py`, `domain.py` (`Money`, `validate_amount`, `Currency`, status state machine),
 `payment_finalization.py` (consumer use case), `gateway.py`, `webhook.py`, `timing.py`,
 `messaging/` (`topology.py`, `relay.py`, `consumer.py`, `outbox_repository.py`), `models.py`,
-`config.py`.
+`config.py`. Outside `src/app`: `demo/` (the demo service: `server.py`, `static/index.html`,
+`Dockerfile`) and `run.sh` (launcher).
 
 ## Run
+
+### Quick start
+
+```bash
+./run.sh
+```
+
+One command (needs only Docker with Compose v2 and curl). It checks that Docker is running, creates
+`.env` from `.env.example` if it is missing (an existing `.env` is never overwritten), picks free
+host ports (if 8000 or 8090 are taken it moves to the next free ones and says so), builds and starts
+the stack with `docker compose up --build -d`, waits up to 180 s until `api` and `demo` are healthy
+(on timeout it prints `docker compose ps` and the last log lines and exits non-zero), prints a
+summary (demo UI, API base URL, API docs, RabbitMQ UI with credentials, the API key, useful
+commands) and opens the demo UI in the browser. Pass `--no-open` or set `NO_OPEN=1` to skip the
+browser. Running it again is safe. The chosen ports are saved in the gitignored `.run.env`, so the
+other subcommands print the right URLs.
+
+| Command | What it does |
+| --- | --- |
+| `./run.sh` or `./run.sh start` | Start everything and wait until it is healthy |
+| `./run.sh stop` | `docker compose down` (data volumes are kept) |
+| `./run.sh reset [-y]` | `docker compose down -v`: also deletes the data; asks first unless `-y` |
+| `./run.sh logs [service]` | Follow logs of all services or one of them |
+| `./run.sh status` | Container state and the URLs of the running stack |
+| `./run.sh test` | Create `.venv` if missing, `pip install -e '.[dev]'`, run `pytest` (Docker is required) |
+| `./run.sh help` | Usage |
+
+Host ports 5672 and 15672 (RabbitMQ) are fixed in `docker-compose.yml`; `run.sh` warns if they are
+taken, and the compose error is shown as is.
+
+### Manual start
 
 ```bash
 cp .env.example .env
@@ -55,8 +87,9 @@ docker compose up --build
 ```
 
 Services: `postgres`, `rabbitmq`, `migrate` (applies migrations, then exits), `api`
-(http://localhost:8000, OpenAPI docs at `/docs`), `relay`, `consumer`. Ports published on the host,
-all bound to `127.0.0.1` only: 8000 (API), 5672 and 15672 (RabbitMQ); PostgreSQL is not published.
+(http://localhost:8000, OpenAPI docs at `/docs`), `relay`, `consumer`, `demo` (http://localhost:8090,
+see [Demo UI](#demo-ui)). Ports published on the host, all bound to `127.0.0.1` only: 8000 (API,
+`API_PORT`), 8090 (demo UI, `DEMO_PORT`), 5672 and 15672 (RabbitMQ); PostgreSQL is not published.
 To reach the API from another machine, change the binding in `docker-compose.yml` on purpose; the
 stack is not hardened for that.
 
@@ -65,7 +98,7 @@ every variable has a default in `docker-compose.yml`, so the stack also starts w
 Compose builds `DATABASE_URL` and `RABBITMQ_URL` from `POSTGRES_*` and `RABBITMQ_*` plus the service
 hostnames; the localhost URLs in `.env.example` are only for running processes on the host. The
 default API key is `change-me`; `API_PORT` (default 8000) sets the host port the API is published
-on. The defaults `change-me` (API key) and `guest` (RabbitMQ), as well as the PostgreSQL password
+on and `DEMO_PORT` (default 8090) the one of the demo UI. The defaults `change-me` (API key) and `guest` (RabbitMQ), as well as the PostgreSQL password
 `payments`, are for the local demo only: set real values in `.env` for anything else. The app
 settings are defined in `src/app/config.py` (`DATABASE_URL`, `RABBITMQ_URL`, `API_KEY` are required;
 relay poll interval and batch size, `CONSUMER_PREFETCH_COUNT`, `WEBHOOK_MAX_ATTEMPTS`, webhook
@@ -74,9 +107,30 @@ values: `RELAY_BATCH_SIZE`, `CONSUMER_PREFETCH_COUNT` and `WEBHOOK_MAX_ATTEMPTS`
 `GATEWAY_SUCCESS_RATE` must be between 0 and 1, and `GATEWAY_MIN_SECONDS` must not exceed
 `GATEWAY_MAX_SECONDS`.
 
+## Demo UI
+
+The `demo` compose service is a manual-testing helper: a single page at http://localhost:8090
+(`DEMO_PORT`, or the port `run.sh` printed). It is not part of the payment service: it is a separate
+container (`demo/`) that is only bound to `127.0.0.1`, proxies the API under `/api` and prefills the
+API key from `API_KEY`. Do not expose it. What the page does:
+
+- Create payments with a form (amount, currency, description, metadata, webhook URL, idempotency key).
+- Scenario buttons that send real requests and say what to expect: idempotency (same key and body,
+  same key with another amount), errors (no `Idempotency-Key`, wrong API key, invalid amount, unknown
+  payment id), a burst of 20 parallel requests with one key, and five payments with new keys.
+- A payments panel with live statuses (`pending` -> `succeeded` or `failed`).
+- A request log with every call and response, with copy-as-curl.
+- A live stream of received webhooks (server-sent events from `/events`).
+- Webhook receivers for use as `webhook_url` inside the compose network: `http://demo:9100/hook`
+  always answers 200, `http://demo:9100/hook/fail` always answers 500, to see retries and the
+  message reach the DLQ.
+
+No receiver on the host is needed; just use `http://demo:9100/hook` as `webhook_url`.
+
 ## Tests, lint, types
 
 Tests use real PostgreSQL and RabbitMQ through testcontainers, so Docker must be running.
+`./run.sh test` creates `.venv`, installs the dev dependencies and runs `pytest`. Or manually:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -100,7 +154,7 @@ RabbitMQ is still started in a container for the consumer and relay tests.
 
 ## API
 
-All endpoints require `X-API-Key`. Examples below assume the default `.env`.
+All endpoints require `X-API-Key`. Examples below assume the default `.env` and the stack from `./run.sh` on the default ports (with a different `API_PORT` change the URL; the key is `API_KEY` from `.env`). They use the built-in receiver `http://demo:9100/hook`.
 
 Create a payment (`Idempotency-Key` is required). `amount` is a decimal with at most 2 places,
 `currency` is `RUB`, `USD` or `EUR`:
@@ -111,7 +165,7 @@ curl -i -X POST http://localhost:8000/api/v1/payments \
   -H 'Idempotency-Key: order-1001' \
   -H 'Content-Type: application/json' \
   -d '{"amount": "100.50", "currency": "USD", "description": "Order 1001",
-       "metadata": {"order_id": 1001}, "webhook_url": "http://host.docker.internal:9000/hook"}'
+       "metadata": {"order_id": 1001}, "webhook_url": "http://demo:9100/hook"}'
 ```
 
 ```
@@ -126,7 +180,7 @@ event is created. Reuse the key with a different payload (here a different amoun
 curl -i -X POST http://localhost:8000/api/v1/payments \
   -H 'X-API-Key: change-me' -H 'Idempotency-Key: order-1001' -H 'Content-Type: application/json' \
   -d '{"amount": "999.00", "currency": "USD", "description": "Order 1001",
-       "metadata": {"order_id": 1001}, "webhook_url": "http://host.docker.internal:9000/hook"}'
+       "metadata": {"order_id": 1001}, "webhook_url": "http://demo:9100/hook"}'
 # HTTP/1.1 409 Conflict
 # {"error":{"code":"idempotency_key_conflict","message":"Idempotency-Key was already used with a different request payload"}}
 ```
@@ -141,7 +195,7 @@ curl -s http://localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: change
 ```json
 {"payment_id": "0b0e5f1e-...", "amount": "100.50", "currency": "USD", "description": "Order 1001",
  "metadata": {"order_id": 1001}, "status": "succeeded",
- "webhook_url": "http://host.docker.internal:9000/hook",
+ "webhook_url": "http://demo:9100/hook",
  "created_at": "2026-01-01T12:00:00.123456Z", "processed_at": "2026-01-01T12:00:03.456789Z"}
 ```
 
@@ -189,9 +243,15 @@ The consumer sends `POST <webhook_url>` with a JSON body:
  "currency": "USD", "processed_at": "2026-01-01T12:00:03.456789+00:00"}
 ```
 
-A tiny receiver to try it (it must be reachable from the `consumer` container; on Docker Desktop
-use `http://host.docker.internal:9000/hook` as `webhook_url`; on Linux that name needs an
-`extra_hosts` entry, which compose does not add):
+The built-in receiver of the `demo` service is the easiest way to try it: use
+`http://demo:9100/hook` (always 200) or `http://demo:9100/hook/fail` (always 500) as `webhook_url`;
+the deliveries show up in the demo UI and at `curl -N http://localhost:8090/events`.
+
+An external receiver works too, as long as it is reachable from the `consumer` container. On Docker
+Desktop use `http://host.docker.internal:<port>/hook` as `webhook_url`; on Linux that name needs an
+`extra_hosts` entry, which compose does not add. Check that the port is really yours: another local
+service (for example MinIO on 9000) may already own it and answer instead of your receiver. A
+minimal one:
 
 ```python
 # receiver.py: python receiver.py
@@ -206,7 +266,7 @@ class Hook(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-HTTPServer(("0.0.0.0", 9000), Hook).serve_forever()
+HTTPServer(("0.0.0.0", 9100), Hook).serve_forever()
 ```
 
 ### RabbitMQ UI and the DLQ
@@ -216,7 +276,7 @@ Open http://localhost:15672 (credentials are `RABBITMQ_USER` / `RABBITMQ_PASSWOR
 - Queues: `payments.new` (quorum) and `payments.new.dlq`. Exchanges: `payments` (direct) and
   `payments.dlx` (fanout).
 - To see a message reach the DLQ, create a payment whose `webhook_url` always fails (for example
-  `http://host.docker.internal:9999/hook` with nothing listening, or a receiver returning 500).
+  `http://demo:9100/hook/fail`, which always returns 500).
   After 3 deliveries (roughly 10-20 s: three webhook rounds with backoff each) the message
   appears in `payments.new.dlq`; use Get messages there to inspect it. The payment itself is
   already `succeeded` or `failed` in the DB; only the notification was not delivered.

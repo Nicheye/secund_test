@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Демо платёжного сервиса</title>
+<style>
+:root {
+  /* warm paper neutrals, petrol accent; status hues kept apart from the accent */
+  --bg: #f3f2ee; --surface: #fbfbf9; --surface-2: #edece6; --border: #dad8cf; --border-strong: #c3c0b4;
+  --text: #1c2126; --muted: #5a636b; --accent: #135e6b; --accent-soft: #dcebee; --accent-text: #ffffff;
+  --ok: #1a6b3a; --ok-bg: #e0f0e4; --bad: #b02a2a; --bad-bg: #f9e2e0;
+  --warn: #8a5a00; --warn-bg: #f7ebcd; --hl: #f4e7a8; --code-key: #135e6b; --code-str: #7a4a1a; --code-num: #6a3d8f;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Roboto, "Noto Sans", Arial, sans-serif;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131619; --surface: #1b1f23; --surface-2: #252a2f; --border: #31383e; --border-strong: #46505a;
+    --text: #e7e9e5; --muted: #9ba5ad; --accent: #62c0cc; --accent-soft: #1b3a40; --accent-text: #06242a;
+    --ok: #74d493; --ok-bg: #173220; --bad: #ff8d85; --bad-bg: #3e1f1e;
+    --warn: #ebb957; --warn-bg: #3a2c11; --hl: #4d4519; --code-key: #7fd0da; --code-str: #e2b27a; --code-num: #c3a2ee;
+  }
+}
+* { box-sizing: border-box; }
+html { scrollbar-color: var(--border-strong) transparent; }
+::selection { background: var(--accent); color: var(--accent-text); }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); -webkit-text-size-adjust: 100%; }
+h1, h2, p { margin: 0; }
+h1 { font-size: 20px; font-weight: 650; line-height: 1.3; }
+h2 { font-size: 16px; font-weight: 650; line-height: 1.3; }
+a { color: var(--accent); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); padding: var(--s3) var(--s4); background: var(--surface); border-bottom: 1px solid var(--border); }
+header h1 { flex: 1 1 auto; }
+header nav { display: flex; flex-wrap: wrap; gap: var(--s4); }
+#conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+
+main { max-width: 1360px; margin: 0 auto; padding: var(--s4); display: grid; gap: var(--s4); grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
+.col { display: grid; gap: var(--s4); min-width: 0; }
+.live { display: flex; flex-direction: column; position: sticky; top: var(--s3); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); }
+.wide { grid-column: 1 / -1; }
+@media (max-width: 960px) {
+  main { grid-template-columns: minmax(0, 1fr); padding: var(--s3); }
+  .live { position: static; max-height: none; }
+  .live > .grow { flex: 0 0 auto; }
+}
+
+section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.live > section { min-height: 0; }
+.live > .grow { flex: 1 1 0; min-height: 300px; }
+.head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s1) var(--s3); padding: var(--s3) var(--s4); }
+.head h2 { display: flex; align-items: center; gap: var(--s2); }
+.tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); }
+.body { padding: 0 var(--s4) var(--s4); }
+.hint { color: var(--muted); font-size: 12px; }
+kbd { font: 12px var(--mono); padding: 1px 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; background: var(--surface-2); color: var(--text); }
+
+label { display: block; font-weight: 600; font-size: 12px; margin-bottom: var(--s1); color: var(--muted); }
+label.check { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-weight: 500; cursor: pointer; }
+input, select, textarea, button { font: inherit; color: inherit; }
+input, select, textarea { width: 100%; min-height: 34px; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 6px; caret-color: var(--accent); }
+input::placeholder { color: var(--muted); opacity: .8; }
+input[type=checkbox] { width: 16px; height: 16px; min-height: 0; padding: 0; accent-color: var(--accent); }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline-offset: 0; border-color: var(--accent); }
+textarea { font-family: var(--mono); font-size: 13px; resize: vertical; min-height: 56px; line-height: 1.45; }
+textarea[aria-invalid=true] { border-color: var(--bad); }
+.mono, pre, code { font-family: var(--mono); font-size: 13px; }
+.num { font-variant-numeric: tabular-nums; }
+button { min-height: 34px; padding: 6px 12px; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer; line-height: 1.3; transition: border-color .15s, background-color .15s; }
+button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+button.small { min-height: 28px; padding: 3px 10px; font-size: 12px; }
+button:disabled { opacity: .55; cursor: default; }
+
+.grid { display: grid; gap: var(--s3); grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid .full { grid-column: 1 / -1; }
+@media (max-width: 520px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.row { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
+.row > input { flex: 1 1 160px; min-width: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.err { color: var(--bad); font-size: 12px; min-height: 18px; margin-top: 2px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); margin-top: var(--s4); }
+.note { font-size: 13px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.note .why { display: block; color: var(--text); }
+details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+details.preview { margin-top: var(--s3); }
+
+pre { margin: 6px 0 0; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; overflow: auto; max-height: 240px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.j-key { color: var(--code-key); } .j-str { color: var(--code-str); } .j-num { color: var(--code-num); } .j-lit { color: var(--muted); font-style: italic; }
+
+/* scenarios: one list, each row is the action */
+.scen { display: grid; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.scen button { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px var(--s3); width: 100%; min-height: 48px; padding: var(--s2) var(--s3); text-align: left; border: 0; border-radius: 0; border-bottom: 1px solid var(--border); background: var(--surface); }
+.scen button:last-child { border-bottom: 0; }
+.scen button:hover:not(:disabled) { background: var(--accent-soft); }
+.scen button:focus-visible { outline-offset: -2px; }
+.scen .t { font-weight: 600; overflow-wrap: anywhere; }
+.scen .e { grid-column: 1; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.scen svg { grid-column: 2; grid-row: 1 / span 2; color: var(--accent); }
+.scen button:disabled { opacity: 1; color: var(--muted); }
+#scenResult:not(:empty), #getResult:not(:empty) { margin-top: var(--s3); }
+.result { padding: var(--s2) var(--s3); border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); }
+.result.pass { background: var(--ok-bg); border-color: var(--ok); }
+.result.fail { background: var(--bad-bg); border-color: var(--bad); }
+.result .verdict { display: flex; align-items: center; gap: 6px; font-weight: 650; }
+.result.pass .verdict { color: var(--ok); } .result.fail .verdict { color: var(--bad); }
+.result .sub { margin-top: 2px; overflow-wrap: anywhere; }
+
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 1.5; background: var(--surface-2); color: var(--text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.badge svg { flex: none; }
+.badge.count { font-weight: 500; color: var(--muted); }
+.badge.pending, .badge.s3 { background: var(--warn-bg); color: var(--warn); }
+.badge.succeeded, .badge.s2 { background: var(--ok-bg); color: var(--ok); }
+.badge.failed, .badge.s4, .badge.s5, .badge.s0 { background: var(--bad-bg); color: var(--bad); }
+
+/* flush lists inside panels */
+.list { flex: 1 1 auto; min-height: 0; overflow: auto; border-top: 1px solid var(--border); background: var(--surface); overscroll-behavior: contain; }
+#payList { flex: 0 1 auto; max-height: 232px; }
+#hookList { min-height: 220px; }
+#logList { max-height: 420px; }
+@media (max-width: 960px) { #hookList { max-height: 420px; } }
+.item { padding: var(--s2) var(--s4); border-bottom: 1px solid var(--border); }
+.item:last-child { border-bottom: 0; }
+.item[hidden] { display: none; }
+.item.clickable { cursor: pointer; display: grid; gap: 2px; }
+.item.clickable:hover { background: var(--surface-2); }
+.item.focus { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.item.flash, .item.new { animation: flash 1.6s var(--ease); }
+@keyframes flash { from { background: var(--hl); } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .item.flash, .item.new { animation: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
+  button { transition: none; }
+}
+.meta { display: flex; flex-wrap: wrap; gap: 2px var(--s3); align-items: center; }
+.muted { color: var(--muted); }
+.wrap { overflow-wrap: anywhere; }
+.empty { padding: var(--s5) var(--s4); color: var(--muted); max-width: 62ch; }
+.empty strong { display: block; color: var(--text); font-weight: 650; margin-bottom: 2px; }
+.empty p + p { margin-top: var(--s2); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
+.dot.up { background: var(--ok); } .dot.down { background: var(--bad); }
+.pidlink { background: none; border: 0; padding: 0; min-height: 0; color: var(--accent); font-family: var(--mono); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.pidlink:hover:not(:disabled) { background: none; }
+.logsum { display: inline-flex; flex-wrap: wrap; gap: 2px var(--s3); align-items: center; vertical-align: middle; }
+.logsum > .path { color: var(--text); overflow-wrap: anywhere; }
+.hookfoot { flex: none; padding: var(--s2) var(--s4); border-top: 1px solid var(--border); }
+.log-body { padding-top: var(--s2); }
+.log-body .hint { margin-top: var(--s2); }
+.log-body .hint:first-child { margin-top: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Демо платёжного сервиса</h1>
+  <span id="conn" role="status" aria-live="polite"><span class="dot"></span><span id="connText">Подключение к потоку событий…</span></span>
+  <nav aria-label="Внешние инструменты">
+    <a id="docsLink" href="#" target="_blank" rel="noopener noreferrer">Документация API</a>
+    <a id="mqLink" href="#" target="_blank" rel="noopener noreferrer">RabbitMQ UI</a>
+  </nav>
+</header>
+
+<main>
+  <div class="col">
+    <section aria-labelledby="hSettings">
+      <div class="head"><h2 id="hSettings">Настройки</h2></div>
+      <div class="body">
+        <label for="apiKey">API-ключ (заголовок X-API-Key)</label>
+        <div class="row">
+          <input id="apiKey" class="mono" autocomplete="off" spellcheck="false">
+          <button type="button" id="resetKey">Сбросить</button>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="hCreate">
+      <div class="head"><h2 id="hCreate">Новый платёж</h2><span class="hint"><kbd>Cmd/Ctrl</kbd> + <kbd>Enter</kbd> — создать</span></div>
+      <form id="createForm" class="body" novalidate>
+        <div class="grid">
+          <div><label for="amount">Сумма (строка, до 2 знаков после точки)</label><input id="amount" class="mono num" value="100.50" inputmode="decimal" autocomplete="off"></div>
+          <div><label for="currency">Валюта</label>
+            <select id="currency"><option>USD</option><option>EUR</option><option>RUB</option></select></div>
+          <div class="full"><label for="description">Описание</label><input id="description" value="Демо-заказ"></div>
+          <div class="full"><label for="metadata">Метаданные (JSON-объект)</label>
+            <textarea id="metadata" spellcheck="false" aria-describedby="metaErr">{}</textarea>
+            <p class="err" id="metaErr" aria-live="polite"></p></div>
+          <div class="full"><label for="webhook">URL вебхука</label>
+            <input id="webhook" class="mono" spellcheck="false">
+            <div class="chips" role="group" aria-label="Шаблоны URL вебхука">
+              <button type="button" class="small" id="presetOk">Успешный получатель</button>
+              <button type="button" class="small" id="presetFail">Сбойный получатель (повторы и DLQ)</button>
+            </div></div>
+          <div class="full"><label for="idem">Idempotency-Key</label>
+            <div class="row"><input id="idem" class="mono" autocomplete="off" spellcheck="false">
+              <button type="button" id="genKey">Сгенерировать</button></div></div>
+        </div>
+        <div class="actions">
+          <button type="submit" class="primary" id="sendBtn">Создать платёж</button>
+          <div class="note" id="sendNote" role="status" aria-live="polite"></div>
+        </div>
+        <details class="preview"><summary>Запрос, который будет отправлен</summary><pre id="preview"></pre></details>
+      </form>
+    </section>
+
+    <section aria-labelledby="hScen">
+      <div class="head"><h2 id="hScen">Сценарии</h2><span class="hint">Настоящие запросы к API</span></div>
+      <div class="body">
+        <div class="scen" id="scen"></div>
+        <div id="scenResult" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="hGet">
+      <div class="head"><h2 id="hGet">Получение платежа</h2><span class="hint">Или выберите платёж в списке сессии</span></div>
+      <div class="body">
+        <form id="getForm" class="row">
+          <label for="getId" class="sr">Идентификатор платежа</label>
+          <input id="getId" class="mono" placeholder="payment_id" autocomplete="off" spellcheck="false">
+          <button type="submit">Получить</button>
+        </form>
+        <div id="getResult" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col live">
+    <section aria-labelledby="hPay">
+      <div class="head"><h2 id="hPay">Платежи сессии <span class="badge count" id="payCount">0 платежей</span></h2><span class="hint">Ожидающие опрашиваются раз в секунду, в журнал не пишутся</span></div>
+      <div class="list" id="payList"></div>
+    </section>
+
+    <section class="grow" aria-labelledby="hHooks">
+      <div class="head">
+        <h2 id="hHooks">Поток вебхуков <span class="badge count" id="hookCount">0 вебхуков</span></h2>
+        <div class="tools">
+          <label class="check"><input type="checkbox" id="onlySession">Только эта сессия</label>
+          <label class="check"><input type="checkbox" id="autoScroll" checked>Автопрокрутка</label>
+          <button type="button" class="small" id="clearHooks">Очистить</button>
+        </div>
+      </div>
+      <div class="list" id="hookList" aria-live="polite" aria-relevant="additions"></div>
+      <p class="hint hookfoot" id="failHint" hidden>/hook/fail отвечает 500: в каждой доставке три попытки, а после трёх доставок сообщение уходит в DLQ (до 9 событий на платёж).</p>
+    </section>
+  </div>
+
+  <section class="wide" aria-labelledby="hLog">
+    <div class="head">
+      <h2 id="hLog">Журнал запросов <span class="badge count" id="logCount">0 запросов</span></h2>
+      <div class="tools">
+        <button type="button" class="small" id="copyLast">Копировать последний как curl</button>
+        <button type="button" class="small" id="clearLog">Очистить журнал</button>
+      </div>
+    </div>
+    <div class="list" id="logList"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const S = {
+  cfg: { api_key: "", webhook_url_ok: "", webhook_url_fail: "", api_docs_url: "", rabbitmq_ui_url: "" },
+  payments: new Map(),   // id -> payment record, insertion order = creation order
+  last: null,            // {key, body} of the last create request, for the "same key" scenarios
+  log: [], hooks: new Map(), hookEls: new Map(), focusPid: null,
+  es: null, busy: false,
+};
+const $ = (id) => document.getElementById(id);
+const API = "/api/v1/payments";
+const STALE_MS = 60000, MAX_HOOKS = 500;
+const NBSP = "\u00A0";
+
+// ---------- Russian text ----------
+const STATUS_RU = { pending: "Ожидает", succeeded: "Успешно", failed: "Отклонён" };
+const FORMS = {
+  payment: ["платёж", "платежа", "платежей"],
+  request: ["запрос", "запроса", "запросов"],
+  hook: ["вебхук", "вебхука", "вебхуков"],
+};
+const ERROR_RU = {
+  idempotency_key_conflict: "Этот Idempotency-Key уже использован с другим телом запроса. Возьмите новый ключ или отправьте прежнее тело.",
+  idempotency_key_required: "Для создания платежа нужен заголовок Idempotency-Key.",
+  idempotency_key_invalid: "Idempotency-Key имеет недопустимый формат. Сгенерируйте новый ключ.",
+  unauthorized: "API не принял ключ: он неверный или не передан. Проверьте поле «API-ключ» в настройках.",
+  payment_not_found: "Платёж с таким идентификатором не найден.",
+  validation_error: "Запрос не прошёл проверку. Подробности по полям — в ответе API.",
+  not_found: "Такого адреса в API нет.",
+  http_error: "API вернул общую HTTP-ошибку. Подробности — в ответе.",
+  upstream_unavailable: "Демо-сервис не дозвонился до API платежей. Проверьте, что сервис api запущен.",
+};
+const NETWORK_RU = "Не удалось связаться с демо-сервером. Проверьте, что он запущен, и повторите запрос.";
+const pluralRules = new Intl.PluralRules("ru");
+function plural(n, forms) { const c = pluralRules.select(n); return c === "one" ? forms[0] : c === "few" ? forms[1] : forms[2]; }
+const count = (n, forms) => `${n}${NBSP}${plural(n, forms)}`;
+const ms = (n) => `${n}${NBSP}мс`;
+
+// ---------- helpers ----------
+const SVG_NS = "http://www.w3.org/2000/svg";
+const ICONS = {
+  check: "M3.5 8.5l3 3 6-7",
+  clock: "M8 4.5V8l2.5 1.5M8 2.2a5.8 5.8 0 100 11.6A5.8 5.8 0 008 2.2z",
+  cross: "M4 4l8 8M12 4l-8 8",
+  play: "M5 3.5v9l7-4.5z",
+};
+function icon(name, size = 12) {
+  const s = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of Object.entries({ viewBox: "0 0 16 16", width: size, height: size, fill: name === "play" ? "currentColor" : "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) s.setAttribute(k, v);
+  const p = document.createElementNS(SVG_NS, "path"); p.setAttribute("d", ICONS[name]); s.append(p);
+  return s;
+}
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v; else if (k.startsWith("on")) el.addEventListener(k.slice(2), v); else el.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) el.append(kid);
+  return el;
+}
+let TIME_FMT = null, DATE_FMT = null;
+try { TIME_FMT = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, hour12: false }); } catch { /* old engine: fall back below */ }
+try { DATE_FMT = new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "medium" }); } catch { /* ignore */ }
+const toDate = (d) => (d instanceof Date ? d : new Date(d));
+function fmtTime(d) { d = toDate(d); if (isNaN(d)) return "—"; return TIME_FMT ? TIME_FMT.format(d) : d.toTimeString().slice(0, 8); }
+function fmtFull(d) { d = toDate(d); if (isNaN(d)) return ""; return DATE_FMT ? DATE_FMT.format(d) : d.toLocaleString("ru-RU"); }
+// "1234.5" -> "1 234,50": display only, digits are never converted to Number
+function fmtAmount(amount, currency) {
+  const m = /^(-?)(\d+)(?:\.(\d*))?$/.exec(String(amount).trim());
+  if (!m) return `${amount}${NBSP}${currency}`;
+  const int = m[2].replace(/\B(?=(\d{3})+(?!\d))/g, NBSP);
+  const frac = m[3] ? (m[3].length === 1 ? m[3] + "0" : m[3]) : "";
+  return `${m[1]}${int}${frac ? "," + frac : ""}${NBSP}${currency}`;
+}
+function pretty(v) {
+  if (typeof v === "string") { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; } }
+  return JSON.stringify(v, null, 2) ?? "";
+}
+const TOKEN = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+// Light JSON colouring built from DOM nodes (no innerHTML), so response text can never inject markup.
+function jsonNodes(text) {
+  const out = []; let last = 0;
+  for (const m of text.matchAll(TOKEN)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1]) { out.push(h("span", { class: m[2] ? "j-key" : "j-str" }, m[1])); if (m[2]) out.push(m[2]); }
+    else if (m[3]) out.push(h("span", { class: "j-lit" }, m[0]));
+    else out.push(h("span", { class: "j-num" }, m[0]));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+const jsonPre = (text, head = "") => h("pre", {}, head, ...jsonNodes(text));
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx".replace(/x/g, () => (Math.random() * 16 | 0).toString(16)));
+const newKey = () => "demo-" + uuid().slice(0, 8);
+const mask = (k) => (k ? k.slice(0, 2) + "••••••" : "");
+const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+};
+function apiOrigin() { try { return new URL(S.cfg.api_docs_url).origin; } catch { return "http://localhost:8000"; } }
+const errCode = (r) => (r.json && r.json.error && r.json.error.code) || "";
+// Russian explanation for a known API error code, or for a transport failure
+const explain = (r) => (r.error ? NETWORK_RU : ERROR_RU[errCode(r)] || "");
+const statusLabel = (s) => STATUS_RU[s] || s;
+
+// ---------- request layer ----------
+// Every call goes through here so it lands in the request log; network failures become status 0.
+async function call(method, path, { key = $("apiKey").value, idem = null, body = undefined, log = true } = {}) {
+  const headers = {};
+  if (key !== null && key !== "") headers["X-API-Key"] = key;
+  if (idem !== null && idem !== "") headers["Idempotency-Key"] = idem;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const t0 = performance.now();
+  let status = 0, text = "", json = null, error = null;
+  try {
+    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    status = res.status; text = await res.text();
+    try { json = JSON.parse(text); } catch { json = null; }
+  } catch (e) { error = String(e && e.message || e); }
+  const dur = Math.round(performance.now() - t0);
+  const out = { status, json, text, error, ms: dur };
+  if (log) addLog({ time: new Date(), method, path, headers, body, key, status, ms: dur, text, json, error });
+  return out;
+}
+function curlFor(e) {
+  const url = apiOrigin() + e.path;
+  const parts = ["curl -i -X " + e.method + " " + shq(url)];
+  for (const [k, v] of Object.entries(e.headers)) parts.push("-H " + shq(`${k}: ${k === "X-API-Key" ? e.key : v}`));
+  if (e.body !== undefined) parts.push("-d " + shq(JSON.stringify(e.body)));
+  return parts.join(" \\\n  ");
+}
+
+// ---------- request log ----------
+function statusBadge(code) { return h("span", { class: "badge s" + Math.floor(code / 100), title: code ? "HTTP " + code : "Ответа нет" }, code ? String(code) : "ERR"); }
+function logEmpty() {
+  $("logList").replaceChildren(h("div", { class: "empty" }, h("strong", {}, "Запросов пока нет"), h("p", {}, "Каждый вызов API с этой страницы появится здесь вместе с заголовками и ответом. Запись раскрывается по клику.")));
+}
+function addLog(e) {
+  S.log.push(e);
+  const shown = { ...e.headers }; if (shown["X-API-Key"]) shown["X-API-Key"] = mask(e.key);
+  const reqHead = `${e.method} ${e.path}\n` + Object.entries(shown).map(([k, v]) => `${k}: ${v}`).join("\n") + (e.body !== undefined ? "\n\n" : "");
+  const reqBody = e.body !== undefined ? pretty(e.body) : "";
+  const resPre = e.error ? h("pre", {}, "Сетевая ошибка: " + e.error)
+    : jsonPre(e.text ? pretty(e.text) : "(пустое тело)", `HTTP ${e.status}\n\n`);
+  const why = explain(e);
+  const code = errCode(e);
+  const copy = h("button", { type: "button", class: "small", onclick: (ev) => copyText(curlFor(e), ev.currentTarget) }, "Копировать как curl");
+  const det = h("details", { class: "item new" },
+    h("summary", {}, h("span", { class: "logsum" },
+      h("span", { class: "muted mono num" }, fmtTime(e.time)), h("strong", { class: "mono" }, e.method), h("span", { class: "mono path" }, e.path),
+      statusBadge(e.status), code ? h("span", { class: "mono muted" }, code) : null, h("span", { class: "muted mono num" }, ms(e.ms)))),
+    h("div", { class: "log-body" }, h("div", { class: "hint" }, "Запрос"), jsonPre(reqBody, reqHead),
+      h("div", { class: "hint" }, "Ответ"), resPre,
+      why ? h("p", { class: "hint" }, "Что это значит: " + why) : null,
+      h("div", { style: "margin-top:8px" }, copy)));
+  setTimeout(() => det.classList.remove("new"), 1700);
+  const list = $("logList");
+  list.querySelector(".empty")?.remove();
+  list.append(det); $("logCount").textContent = count(S.log.length, FORMS.request);
+  list.scrollTop = list.scrollHeight;
+}
+async function copyText(text, btn) {
+  const old = btn.dataset.label || btn.textContent; btn.dataset.label = old;
+  try { await navigator.clipboard.writeText(text); btn.textContent = "Скопировано"; } catch { btn.textContent = "Не удалось скопировать"; }
+  setTimeout(() => { btn.textContent = old; }, 1200);
+}
+
+// ---------- form ----------
+function readMetadata() {
+  const raw = $("metadata").value.trim() || "{}";
+  try {
+    const v = JSON.parse(raw);
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return { error: "Метаданные должны быть JSON-объектом, например {\"order_id\": 1}" };
+    return { value: v };
+  } catch (e) { return { error: "Некорректный JSON: " + e.message }; }
+}
+function formBody() {
+  const body = { amount: $("amount").value.trim(), currency: $("currency").value, description: $("description").value, metadata: readMetadata().value ?? {} };
+  const w = $("webhook").value.trim(); if (w) body.webhook_url = w;
+  return body;
+}
+function updatePreview() {
+  const m = readMetadata();
+  $("metaErr").textContent = m.error || "";
+  $("metadata").setAttribute("aria-invalid", m.error ? "true" : "false");
+  $("sendBtn").disabled = !!m.error || S.busy;
+  const headers = { "X-API-Key": mask($("apiKey").value), "Idempotency-Key": $("idem").value, "Content-Type": "application/json" };
+  $("preview").textContent = `POST ${location.origin}${API}\n` + Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\n") + "\n\n" + pretty(formBody());
+}
+async function createPayment({ key, body, apiKey, silent } = {}) {
+  const idem = key === undefined ? $("idem").value : key;
+  body = body || formBody();
+  const r = await call("POST", API, { idem, body, key: apiKey === undefined ? $("apiKey").value : apiKey });
+  if (r.status === 202 && r.json && r.json.payment_id) {
+    if (!silent) S.last = { key: idem, body };
+    trackPayment(r.json, body, idem);
+    $("getId").value = r.json.payment_id;
+  }
+  return r;
+}
+async function submitCreate(ev) {
+  if (ev) ev.preventDefault();
+  if (readMetadata().error || S.busy) return;
+  S.busy = true; updatePreview(); $("sendBtn").setAttribute("aria-busy", "true"); $("sendNote").textContent = "Отправка…";
+  const usedKey = $("idem").value;
+  const r = await createPayment();
+  // A fresh key after success keeps repeated Send clicks from hitting 409 when the form changed; the replay scenarios reuse S.last.
+  if (r.status === 202) $("idem").value = newKey();
+  S.busy = false; $("sendBtn").removeAttribute("aria-busy"); updatePreview();
+  const head = r.error ? "Сетевая ошибка: " + r.error
+    : `HTTP ${r.status}` + (r.json && r.json.error ? ` ${r.json.error.code}: ${r.json.error.message}` : r.json && r.json.payment_id ? " " + r.json.payment_id + ` (ключ ${usedKey})` : "");
+  const why = explain(r);
+  $("sendNote").replaceChildren(head, ...(why ? [h("span", { class: "why" }, why)] : []));
+}
+
+// ---------- scenarios ----------
+const baseBody = () => formBody();
+const got = (r) => (r.error ? "Сетевая ошибка: " + r.error : `Получен ${r.status} ${errCode(r)}`.trim() + ".");
+const SCENARIOS = [
+  { label: "Повторить запрос (тот же ключ и тело)", expect: "Ожидается 202 и тот же payment_id.", async run() {
+      if (!S.last) return { ok: false, text: "Сначала создайте платёж." };
+      const first = [...S.payments.values()].find((p) => p.key === S.last.key);
+      const r = await createPayment({ key: S.last.key, body: S.last.body, silent: true });
+      const same = first && r.json && r.json.payment_id === first.id;
+      return { ok: r.status === 202 && !!same, text: `Получен ${r.status}, payment_id ${r.json && r.json.payment_id}${same ? " (тот же, что и раньше)" : " (не тот же)"}.`, note: explain(r) };
+  } },
+  { label: "Тот же ключ, другая сумма", expect: "Ожидается 409 idempotency_key_conflict.", async run() {
+      if (!S.last) return { ok: false, text: "Сначала создайте платёж." };
+      const amount = S.last.body.amount === "999.99" ? "888.88" : "999.99";
+      const r = await createPayment({ key: S.last.key, body: { ...S.last.body, amount }, silent: true });
+      return { ok: r.status === 409, text: got(r), note: explain(r) };
+  } },
+  { label: "Запрос без Idempotency-Key", expect: "Ожидается 400 idempotency_key_required.", async run() {
+      const r = await call("POST", API, { idem: null, body: baseBody() });
+      return { ok: r.status === 400, text: got(r), note: explain(r) };
+  } },
+  { label: "Неверный API-ключ", expect: "Ожидается 401 unauthorized.", async run() {
+      const r = await call("POST", API, { key: "wrong-key", idem: newKey(), body: baseBody() });
+      return { ok: r.status === 401, text: got(r), note: explain(r) };
+  } },
+  { label: "Недопустимая сумма (−1)", expect: "Ожидается 422 validation_error.", async run() {
+      const r = await call("POST", API, { idem: newKey(), body: { ...baseBody(), amount: "-1" } });
+      return { ok: r.status === 422, text: got(r), note: explain(r) };
+  } },
+  { label: "Несуществующий платёж", expect: "Ожидается 404 payment_not_found.", async run() {
+      const r = await call("GET", `${API}/${uuid()}`);
+      return { ok: r.status === 404, text: got(r), note: explain(r) };
+  } },
+  { label: "Пакет: 20 параллельных запросов с одним ключом", expect: "Ожидается один payment_id; остальные ответы — 202 (или 409, пока выполняется первый запрос).", async run() {
+      const key = newKey(), body = baseBody();
+      const rs = await Promise.all(Array.from({ length: 20 }, () => call("POST", API, { idem: key, body })));
+      const by = (c) => rs.filter((r) => r.status === c).length;
+      const ids = new Set(rs.filter((r) => r.status === 202 && r.json).map((r) => r.json.payment_id));
+      const first = rs.find((r) => r.status === 202 && r.json);
+      if (first) { trackPayment(first.json, body, key); S.last = { key, body }; }
+      const other = rs.length - by(202) - by(409);
+      return { ok: ids.size === 1 && other === 0, text: `202: ${by(202)}, 409: ${by(409)}, прочие: ${other}; уникальных payment_id: ${ids.size}.` };
+  } },
+  { label: "Пять платежей с новыми ключами", expect: "Ожидается пять ответов 202 с разными payment_id.", async run() {
+      const rs = [];
+      for (let i = 0; i < 5; i++) rs.push(await createPayment({ key: newKey(), silent: true }));
+      const ids = new Set(rs.filter((r) => r.status === 202 && r.json).map((r) => r.json.payment_id));
+      return { ok: ids.size === 5, text: `Ответов 202: ${rs.filter((r) => r.status === 202).length}; разных payment_id: ${ids.size}.`, note: explain(rs.find((r) => r.status !== 202) || {}) };
+  } },
+];
+function renderScenarios() {
+  const box = $("scen");
+  for (const s of SCENARIOS) {
+    const btn = h("button", { type: "button" }, h("span", { class: "t" }, s.label), icon("play", 12), h("span", { class: "e" }, s.expect));
+    btn.addEventListener("click", async () => {
+      btn.disabled = true; btn.setAttribute("aria-busy", "true"); showScen({ text: "Выполняется: " + s.label + "…" });
+      let res;
+      try { res = await s.run(); } catch (e) { res = { ok: false, text: "Непредвиденная ошибка: " + e.message }; }
+      showScen({ ...res, label: s.label, expect: s.expect }); btn.disabled = false; btn.removeAttribute("aria-busy");
+    });
+    box.append(btn);
+  }
+}
+function showScen(r) {
+  const el = h("div", { class: "result" + (r.label ? (r.ok ? " pass" : " fail") : "") });
+  if (r.label) {
+    el.append(h("div", { class: "verdict" }, icon(r.ok ? "check" : "cross", 14), r.ok ? "Совпало с ожиданием" : "Не совпало с ожиданием"),
+      h("div", { class: "sub" }, h("strong", {}, r.label)), h("div", { class: "sub" }, r.text));
+    if (r.note) el.append(h("div", { class: "hint sub" }, "Что это значит: " + r.note));
+    el.append(h("div", { class: "hint sub" }, r.expect));
+  } else el.append(r.text);
+  $("scenResult").replaceChildren(el);
+}
+
+// ---------- get payment ----------
+async function getPayment(ev) {
+  if (ev) ev.preventDefault();
+  const id = $("getId").value.trim();
+  if (!id) { $("getResult").replaceChildren(h("div", { class: "result fail" }, "Введите идентификатор платежа.")); return; }
+  const r = await call("GET", `${API}/${encodeURIComponent(id)}`);
+  const why = explain(r);
+  $("getResult").replaceChildren(h("div", { class: "meta" }, statusBadge(r.status), h("span", { class: "muted mono num" }, ms(r.ms))),
+    ...(why ? [h("p", { class: "hint" }, why)] : []),
+    r.error ? h("pre", {}, "Сетевая ошибка: " + r.error) : jsonPre(pretty(r.text) || "(пустое тело)"));
+  if (r.status === 200 && r.json && S.payments.has(r.json.payment_id)) { mergePayment(S.payments.get(r.json.payment_id), r.json); renderPayments(); }
+}
+
+// ---------- payments panel ----------
+function trackPayment(created, body, key) {
+  if (S.payments.has(created.payment_id)) return;
+  S.payments.set(created.payment_id, { id: created.payment_id, key, amount: body.amount, currency: body.currency,
+    status: created.status || "pending", created_at: created.created_at, processed_at: null, since: Date.now(), stale: false, busy: false, flash: true });
+  renderPayments();
+}
+function mergePayment(p, d) {
+  if (d.status !== p.status) p.flash = true;
+  Object.assign(p, { status: d.status, amount: d.amount, currency: d.currency, processed_at: d.processed_at, created_at: d.created_at });
+}
+function statusBadgeFor(status) {
+  const name = status === "succeeded" ? "check" : status === "failed" ? "cross" : "clock";
+  return h("span", { class: "badge " + status, title: "Статус в API: " + status }, icon(name, 12), statusLabel(status));
+}
+function renderPayments() {
+  const list = $("payList"), items = [...S.payments.values()].reverse();
+  $("payCount").textContent = count(items.length, FORMS.payment);
+  if (!items.length) { list.replaceChildren(h("div", { class: "empty" }, h("strong", {}, "Платежей пока нет"), h("p", {}, "Создайте платёж в форме слева: он появится здесь и сменит статус, когда сервис его обработает."))); return; }
+  list.replaceChildren(...items.map((p) => {
+    const row = h("div", { class: "item clickable" + (S.focusPid === p.id ? " focus" : "") + (p.flash ? " flash" : ""), tabindex: "0", role: "button", "data-pid": p.id, "aria-label": "Подставить платёж " + p.id + " в поле поиска" },
+      h("div", { class: "meta" }, statusBadgeFor(p.status), h("strong", { class: "mono num" }, fmtAmount(p.amount, p.currency)),
+        p.stale ? h("span", { class: "badge s3", title: "Финального статуса нет уже 60 с, опрос остановлен" }, "устарел") : null),
+      h("div", { class: "mono muted wrap" }, p.id),
+      h("div", { class: "hint num", title: fmtFull(p.created_at) }, `создан ${fmtTime(p.created_at)}` + (p.processed_at ? `, обработан ${fmtTime(p.processed_at)}` : "") + (p.stale ? " — опрос остановлен через 60 с" : "")));
+    if (p.flash) { p.flash = false; setTimeout(() => row.classList.remove("flash"), 1700); }
+    const pick = () => { $("getId").value = p.id; $("getId").focus(); };
+    row.addEventListener("click", pick);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    return row;
+  }));
+}
+async function pollPending() {
+  let changed = false;
+  await Promise.all([...S.payments.values()].filter((p) => p.status === "pending" && !p.stale && !p.busy).map(async (p) => {
+    if (Date.now() - p.since > STALE_MS) { p.stale = true; changed = true; return; }
+    p.busy = true;
+    const r = await call("GET", `${API}/${encodeURIComponent(p.id)}`, { log: false });
+    p.busy = false;
+    if (r.status === 200 && r.json && r.json.status !== p.status) { mergePayment(p, r.json); changed = true; }
+  }));
+  if (changed) renderPayments();
+}
+
+// ---------- webhook stream ----------
+function setConn(state, text) { $("conn").firstChild.className = "dot " + state; $("connText").textContent = text; }
+function connect() {
+  if (S.es) S.es.close();
+  let es;
+  try { es = new EventSource("/events"); } catch { setConn("down", "Поток событий недоступен"); return; }
+  S.es = es;
+  es.onopen = () => setConn("up", "Поток событий подключён");
+  es.onerror = () => {
+    setConn("down", "Переподключение к потоку событий…");
+    if (es.readyState === EventSource.CLOSED) setTimeout(connect, 3000); // browser gave up; retry ourselves
+  };
+  es.onmessage = (m) => { try { addHook(JSON.parse(m.data)); } catch { /* ignore malformed event */ } };
+  es.addEventListener("cleared", () => clearHooksLocal());
+}
+function hookVisible(ev) {
+  return !$("onlySession").checked || (ev.payment_id && S.payments.has(ev.payment_id));
+}
+function addHook(ev) {
+  const id = String(ev.id);
+  if (S.hooks.has(id)) return; // the buffer is replayed on every reconnect
+  S.hooks.set(id, ev);
+  const isFail = String(ev.path || "").includes("fail");
+  const pid = ev.payment_id ? h("button", { type: "button", class: "pidlink", title: "Подсветить этот платёж" }, ev.payment_id) : h("span", { class: "muted" }, "без payment_id");
+  if (ev.payment_id) pid.addEventListener("click", () => focusPayment(ev.payment_id));
+  const el = h("div", { class: "item new", "data-pid": ev.payment_id || "" },
+    h("div", { class: "meta" }, h("span", { class: "muted mono num", title: fmtFull(ev.received_at) }, fmtTime(ev.received_at)), h("strong", { class: "mono" }, ev.path || "?"),
+      h("span", { class: "badge " + (ev.ok ? "s2" : "s5"), title: ev.ok ? "Получатель ответил успешно" : "Получатель вернул ошибку" }, String(ev.status_returned)), pid),
+    jsonPre(pretty(ev.body ?? "")));
+  S.hookEls.set(id, el);
+  if (isFail) $("failHint").hidden = false;
+  $("hookList").querySelector(".empty")?.remove();
+  $("hookList").append(el);
+  setTimeout(() => el.classList.remove("new"), 1700);
+  if (S.hooks.size > MAX_HOOKS) { const old = S.hooks.keys().next().value; S.hooks.delete(old); S.hookEls.get(old)?.remove(); S.hookEls.delete(old); }
+  applyHookView();
+  if ($("autoScroll").checked) $("hookList").scrollTop = $("hookList").scrollHeight;
+}
+function applyHookView() {
+  let n = 0;
+  for (const [id, ev] of S.hooks) {
+    const el = S.hookEls.get(id), vis = hookVisible(ev);
+    el.hidden = !vis; if (vis) n++;
+    el.classList.toggle("focus", !!S.focusPid && ev.payment_id === S.focusPid);
+  }
+  const total = S.hooks.size;
+  $("hookCount").textContent = n === total ? count(n, FORMS.hook) : `${n} из ${total}${NBSP}${FORMS.hook[2]}`;
+  showHookEmpty();
+}
+function showHookEmpty() {
+  const list = $("hookList");
+  if (list.querySelector(".empty") || [...S.hookEls.values()].some((e) => !e.hidden)) return;
+  list.append(S.hooks.size
+    ? h("div", { class: "empty" }, h("strong", {}, "Под фильтр ничего не попало"), h("p", {}, "Отключите «Только эта сессия», чтобы увидеть все полученные вебхуки."))
+    : h("div", { class: "empty" }, h("strong", {}, "Вебхуков пока нет"),
+        h("p", {}, "Потребитель вызывает URL вебхука через 2–5 секунд после создания платежа."),
+        h("p", {}, "С шаблоном «Успешный получатель» придёт одно событие с ответом 200. Если выбрать «Сбойный получатель», он ответит 500: в каждой доставке три попытки, а после трёх доставок сообщение уйдёт в DLQ (до 9 событий).")));
+}
+function clearHooksLocal() {
+  S.hooks.clear(); S.hookEls.clear(); $("hookList").replaceChildren(); $("failHint").hidden = true; applyHookView();
+}
+async function clearHooks() {
+  const r = await call("DELETE", "/events", { key: null, log: false });
+  if (r.error) { $("hookList").prepend(h("div", { class: "err", style: "padding:8px 16px" }, "Не удалось очистить поток: " + r.error)); return; }
+  clearHooksLocal();
+}
+function focusPayment(pid) {
+  S.focusPid = S.focusPid === pid ? null : pid;
+  renderPayments(); applyHookView();
+  if (!S.focusPid) return;
+  const row = $("payList").querySelector(`[data-pid="${CSS.escape(pid)}"]`);
+  if (row) { row.scrollIntoView({ block: "nearest" }); row.classList.add("flash"); setTimeout(() => row.classList.remove("flash"), 1700); }
+}
+
+// ---------- init ----------
+async function init() {
+  $("docsLink").addEventListener("click", (e) => { if (!S.cfg.api_docs_url) e.preventDefault(); });
+  renderScenarios(); renderPayments(); applyHookView(); logEmpty();
+  try {
+    const res = await fetch("/config"); S.cfg = { ...S.cfg, ...(await res.json()) };
+  } catch { /* the page still works with manual input */ }
+  $("docsLink").href = S.cfg.api_docs_url || "#"; $("mqLink").href = S.cfg.rabbitmq_ui_url || "#";
+  $("apiKey").value = store.get("demo.apiKey") ?? S.cfg.api_key;
+  $("webhook").value = S.cfg.webhook_url_ok;
+  $("idem").value = newKey();
+  updatePreview();
+
+  $("apiKey").addEventListener("input", () => { store.set("demo.apiKey", $("apiKey").value); updatePreview(); });
+  $("resetKey").addEventListener("click", () => { $("apiKey").value = S.cfg.api_key; store.set("demo.apiKey", S.cfg.api_key); updatePreview(); });
+  $("createForm").addEventListener("input", updatePreview);
+  $("createForm").addEventListener("submit", submitCreate);
+  $("createForm").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitCreate(e); });
+  $("presetOk").addEventListener("click", () => { $("webhook").value = S.cfg.webhook_url_ok; updatePreview(); });
+  $("presetFail").addEventListener("click", () => { $("webhook").value = S.cfg.webhook_url_fail; updatePreview(); });
+  $("genKey").addEventListener("click", () => { $("idem").value = newKey(); updatePreview(); });
+  $("getForm").addEventListener("submit", getPayment);
+  $("onlySession").addEventListener("change", applyHookView);
+  $("clearHooks").addEventListener("click", clearHooks);
+  $("clearLog").addEventListener("click", () => { S.log = []; logEmpty(); $("logCount").textContent = count(0, FORMS.request); });
+  $("copyLast").addEventListener("click", (ev) => { const e = S.log[S.log.length - 1]; if (e) copyText(curlFor(e), ev.currentTarget); });
+
+  setInterval(pollPending, 1000);
+  connect();
+}
+init();
+</script>
+</body>
+</html>

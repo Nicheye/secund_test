@@ -13,7 +13,7 @@ PostgreSQL, RabbitMQ (FastStream), Alembic, Docker Compose. Spec: [docs/task-spe
 
 | Doc | What is in it |
 | --- | --- |
-| [README.md](README.md) | What the service is, architecture, how to run and test it, API examples, design decisions and trade-offs. |
+| [README.md](README.md) | What the service is, architecture, how to run it (`./run.sh`) and test it, the demo UI, API examples, design decisions and trade-offs. |
 | [README.ru.md](README.ru.md) | Russian translation of `README.md`. Update both together. |
 | [docs/engineering-principles.md](docs/engineering-principles.md) | Engineering principles, naming, testing, API and fintech-specific rules. Read before writing or reviewing code. |
 | [docs/task-spec.md](docs/task-spec.md) | The assignment: entities, API, outbox, retry/DLQ, stack, deliverables, evaluation criteria. |

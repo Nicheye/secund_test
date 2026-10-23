@@ -36,8 +36,8 @@ RabbitMQ (FastStream), Alembic, Docker Compose. Задание описано в
 
 Процессы (каждый — отдельный сервис compose): `api` (HTTP), `relay` (outbox → RabbitMQ), `consumer`
 (`payments.new` → шлюз → БД → webhook), `migrate` (один раз выполняет `alembic upgrade head` и
-завершается). Все долгоживущие сервисы (`postgres`, `rabbitmq`, `api`, `relay`, `consumer`) запущены
-с `restart: unless-stopped`: relay и consumer восстанавливаются после падений, а перезапущенная
+завершается), `demo` (локальный помощник для ручного тестирования, см. [Демо-интерфейс](#демо-интерфейс); не часть платёжного сервиса). Все долгоживущие сервисы (`postgres`, `rabbitmq`, `api`, `relay`, `consumer`) запущены
+с `restart: unless-stopped` (как и `demo`): relay и consumer восстанавливаются после падений, а перезапущенная
 зависимость возвращается в строй. Неопубликованные строки outbox и неподтверждённые сообщения
 обрабатываются заново. У `migrate` одноразовый запуск, политики перезапуска нет.
 
@@ -45,9 +45,42 @@ RabbitMQ (FastStream), Alembic, Docker Compose. Задание описано в
 (создание и получение платежа), `repositories.py`, `domain.py` (`Money`, `Currency`, конечный
 автомат статусов; `validate_amount`), `payment_finalization.py` (сценарий consumer), `gateway.py`,
 `webhook.py`, `timing.py`, `messaging/` (`topology.py`, `relay.py`, `consumer.py`,
-`outbox_repository.py`), `models.py`, `config.py`.
+`outbox_repository.py`), `models.py`, `config.py`. Вне `src/app`: `demo/` (сервис демо-интерфейса:
+`server.py`, `static/index.html`, `Dockerfile`) и `run.sh` (скрипт запуска).
 
 ## Запуск
+
+### Быстрый старт
+
+```bash
+./run.sh
+```
+
+Одна команда (нужны только Docker с Compose v2 и curl). Скрипт проверяет, что Docker запущен, создаёт
+`.env` из `.env.example`, если файла нет (существующий `.env` никогда не перезаписывается), выбирает
+свободные порты хоста (если 8000 или 8090 заняты, берёт ближайшие свободные и сообщает об этом),
+собирает и запускает стек командой `docker compose up --build -d`, ждёт до 180 с, пока `api` и
+`demo` станут healthy (при превышении времени выводит `docker compose ps` и последние строки логов и
+завершается с ненулевым кодом), печатает сводку (демо-интерфейс, базовый URL API, документация API,
+интерфейс RabbitMQ с учётными данными, API-ключ, полезные команды) и открывает демо-интерфейс в
+браузере. Чтобы не открывать браузер, передайте `--no-open` или задайте `NO_OPEN=1`. Повторный запуск
+безопасен. Выбранные порты сохраняются в `.run.env` (он в gitignore), поэтому остальные подкоманды
+выводят правильные URL.
+
+| Команда | Что делает |
+| --- | --- |
+| `./run.sh` или `./run.sh start` | Запускает всё и ждёт, пока сервисы станут healthy |
+| `./run.sh stop` | `docker compose down` (тома с данными сохраняются) |
+| `./run.sh reset [-y]` | `docker compose down -v`: удаляет и данные; без `-y` спрашивает подтверждение |
+| `./run.sh logs [service]` | Показывает логи всех сервисов или одного |
+| `./run.sh status` | Состояние контейнеров и URL запущенного стека |
+| `./run.sh test` | Создаёт `.venv`, если его нет, выполняет `pip install -e '.[dev]'` и запускает `pytest` (нужен Docker) |
+| `./run.sh help` | Справка |
+
+Порты хоста 5672 и 15672 (RabbitMQ) зафиксированы в `docker-compose.yml`. Если они заняты, `run.sh`
+предупредит об этом, а ошибка compose будет показана как есть.
+
+### Запуск вручную
 
 ```bash
 cp .env.example .env
@@ -55,17 +88,18 @@ docker compose up --build
 ```
 
 Сервисы: `postgres`, `rabbitmq`, `migrate` (применяет миграции и завершается), `api`
-(http://localhost:8000, документация OpenAPI по адресу `/docs`), `relay`, `consumer`. На хост
-проброшены порты 8000 (API), 5672 и 15672 (RabbitMQ), все привязаны только к `127.0.0.1`.
-PostgreSQL наружу не публикуется. Чтобы открыть API с другой машины, измените привязку в
-`docker-compose.yml` осознанно: стек для этого не усилен.
+(http://localhost:8000, документация OpenAPI по адресу `/docs`), `relay`, `consumer`, `demo`
+(http://localhost:8090, см. [Демо-интерфейс](#демо-интерфейс)). На хост проброшены порты, все
+привязаны только к `127.0.0.1`: 8000 (API, `API_PORT`), 8090 (демо-интерфейс, `DEMO_PORT`), 5672 и
+15672 (RabbitMQ). PostgreSQL наружу не публикуется. Чтобы открыть API с другой машины, измените
+привязку в `docker-compose.yml` осознанно: стек для этого не усилен.
 
 Конфигурация берётся из `.env` (копия `.env.example`) через подстановку переменных в compose. У
 каждой переменной в `docker-compose.yml` есть значение по умолчанию, поэтому стек запускается и без
 `.env`. Compose собирает `DATABASE_URL` и `RABBITMQ_URL` из `POSTGRES_*`, `RABBITMQ_*` и имён
 сервисов. URL с localhost в `.env.example` нужны только для запуска процессов на хосте. API-ключ по
 умолчанию — `change-me`. `API_PORT` (по умолчанию 8000) задаёт порт хоста, на котором публикуется
-API. Значения по умолчанию `change-me` (API-ключ) и `guest` (RabbitMQ), а также пароль PostgreSQL
+API, а `DEMO_PORT` (по умолчанию 8090) — порт демо-интерфейса. Значения по умолчанию `change-me` (API-ключ) и `guest` (RabbitMQ), а также пароль PostgreSQL
 `payments` предназначены только для локальной демонстрации: для любого другого случая задайте
 настоящие значения в `.env`. Настройки приложения описаны в `src/app/config.py`: `DATABASE_URL`,
 `RABBITMQ_URL` и `API_KEY` обязательны. У интервала опроса и размера пачки relay,
@@ -75,10 +109,31 @@ API. Значения по умолчанию `change-me` (API-ключ) и `gue
 `GATEWAY_SUCCESS_RATE` — от 0 до 1, а `GATEWAY_MIN_SECONDS` не должен превышать
 `GATEWAY_MAX_SECONDS`.
 
+## Демо-интерфейс
+
+Сервис `demo` в compose — помощник для ручного тестирования: одна страница по адресу
+http://localhost:8090 (`DEMO_PORT` или порт, который напечатал `run.sh`). Он не входит в платёжный
+сервис: это отдельный контейнер (`demo/`), привязанный только к `127.0.0.1`, который проксирует API
+по пути `/api` и подставляет API-ключ из `API_KEY`. Не публикуйте его наружу. Что умеет страница:
+
+- Создание платежей через форму (сумма, валюта, описание, metadata, URL webhook, ключ идемпотентности).
+- Кнопки сценариев, которые отправляют настоящие запросы и подсказывают ожидаемый результат:
+  идемпотентность (тот же ключ и тело, тот же ключ с другой суммой), ошибки (нет `Idempotency-Key`,
+  неверный API-ключ, некорректная сумма, неизвестный id платежа), пачка из 20 параллельных запросов с
+  одним ключом и пять платежей с новыми ключами.
+- Панель платежей с живыми статусами (`pending` -> `succeeded` или `failed`).
+- Журнал запросов со всеми вызовами и ответами и копированием в виде curl.
+- Живой поток полученных webhook (server-sent events с `/events`).
+- Приёмники webhook внутри сети compose, которые можно указать как `webhook_url`:
+  `http://demo:9100/hook` всегда отвечает 200, `http://demo:9100/hook/fail` всегда отвечает 500 —
+  так видны повторные попытки и попадание сообщения в DLQ.
+
+Приёмник на хосте не нужен: укажите `http://demo:9100/hook` как `webhook_url`.
+
 ## Тесты, линтер, типы
 
 Тесты используют настоящие PostgreSQL и RabbitMQ через testcontainers, поэтому Docker должен быть
-запущен.
+запущен. `./run.sh test` создаёт `.venv`, ставит dev-зависимости и запускает `pytest`. Либо вручную:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -102,7 +157,7 @@ RabbitMQ для тестов consumer и relay всё равно запуска�
 
 ## API
 
-Все эндпоинты требуют заголовок `X-API-Key`. Примеры ниже рассчитаны на `.env` по умолчанию.
+Все эндпоинты требуют заголовок `X-API-Key`. Примеры ниже рассчитаны на `.env` по умолчанию и стек из `./run.sh` на портах по умолчанию (при другом `API_PORT` измените URL, ключ — `API_KEY` из `.env`). В них используется встроенный приёмник `http://demo:9100/hook`.
 
 Создание платежа (заголовок `Idempotency-Key` обязателен). `amount` — десятичное число не более чем
 с двумя знаками после запятой, `currency` — `RUB`, `USD` или `EUR`:
@@ -113,7 +168,7 @@ curl -i -X POST http://localhost:8000/api/v1/payments \
   -H 'Idempotency-Key: order-1001' \
   -H 'Content-Type: application/json' \
   -d '{"amount": "100.50", "currency": "USD", "description": "Order 1001",
-       "metadata": {"order_id": 1001}, "webhook_url": "http://host.docker.internal:9000/hook"}'
+       "metadata": {"order_id": 1001}, "webhook_url": "http://demo:9100/hook"}'
 ```
 
 ```
@@ -128,7 +183,7 @@ HTTP/1.1 202 Accepted
 curl -i -X POST http://localhost:8000/api/v1/payments \
   -H 'X-API-Key: change-me' -H 'Idempotency-Key: order-1001' -H 'Content-Type: application/json' \
   -d '{"amount": "999.00", "currency": "USD", "description": "Order 1001",
-       "metadata": {"order_id": 1001}, "webhook_url": "http://host.docker.internal:9000/hook"}'
+       "metadata": {"order_id": 1001}, "webhook_url": "http://demo:9100/hook"}'
 # HTTP/1.1 409 Conflict
 # {"error":{"code":"idempotency_key_conflict","message":"Idempotency-Key was already used with a different request payload"}}
 ```
@@ -143,7 +198,7 @@ curl -s http://localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: change
 ```json
 {"payment_id": "0b0e5f1e-...", "amount": "100.50", "currency": "USD", "description": "Order 1001",
  "metadata": {"order_id": 1001}, "status": "succeeded",
- "webhook_url": "http://host.docker.internal:9000/hook",
+ "webhook_url": "http://demo:9100/hook",
  "created_at": "2026-01-01T12:00:00.123456Z", "processed_at": "2026-01-01T12:00:03.456789Z"}
 ```
 
@@ -191,9 +246,15 @@ Consumer отправляет `POST <webhook_url>` с JSON-телом:
  "currency": "USD", "processed_at": "2026-01-01T12:00:03.456789+00:00"}
 ```
 
-Небольшой приёмник для проверки. Он должен быть доступен из контейнера `consumer`. В Docker Desktop
-используйте `http://host.docker.internal:9000/hook` как `webhook_url`. В Linux это имя требует
-записи `extra_hosts`, которую compose не добавляет:
+Проще всего проверить доставку встроенным приёмником сервиса `demo`: укажите как `webhook_url`
+`http://demo:9100/hook` (всегда 200) или `http://demo:9100/hook/fail` (всегда 500). Доставки видны
+в демо-интерфейсе и в выводе `curl -N http://localhost:8090/events`.
+
+Подойдёт и внешний приёмник, если он доступен из контейнера `consumer`. В Docker Desktop используйте
+`http://host.docker.internal:<port>/hook` как `webhook_url`. В Linux это имя требует записи
+`extra_hosts`, которую compose не добавляет. Убедитесь, что порт действительно ваш: его может уже
+занимать другой локальный сервис (например, MinIO на 9000) и отвечать вместо вашего приёмника.
+Минимальный пример:
 
 ```python
 # receiver.py: python receiver.py
@@ -208,7 +269,7 @@ class Hook(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-HTTPServer(("0.0.0.0", 9000), Hook).serve_forever()
+HTTPServer(("0.0.0.0", 9100), Hook).serve_forever()
 ```
 
 ### Интерфейс RabbitMQ и DLQ
@@ -219,8 +280,7 @@ HTTPServer(("0.0.0.0", 9000), Hook).serve_forever()
 - Очереди: `payments.new` (quorum) и `payments.new.dlq`. Обменники: `payments` (direct) и
   `payments.dlx` (fanout).
 - Чтобы увидеть, как сообщение попадает в DLQ, создайте платёж с `webhook_url`, который всегда
-  завершается ошибкой (например, `http://host.docker.internal:9999/hook`, где никто не слушает, или
-  приёмник, отвечающий 500). После 3 доставок (примерно 10–20 с: три раунда отправки webhook, в
+  завершается ошибкой (например, `http://demo:9100/hook/fail`, который всегда отвечает 500). После 3 доставок (примерно 10–20 с: три раунда отправки webhook, в
   каждом свой backoff) сообщение появится в `payments.new.dlq`. Посмотреть его можно через Get
   messages. Сам платёж к этому моменту уже `succeeded` или `failed` в БД, не доставлено только
   уведомление.

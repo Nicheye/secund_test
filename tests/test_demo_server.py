@@ -163,24 +163,23 @@ def test_read_settings_uses_defaults_when_environment_is_empty(
     )
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("true", True),
-        ("false", False),
-        ("TRUE", False),
-        ("1", False),
-        ("yes", False),
-        ("0", False),
-        ("", False),
-    ],
-)
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
 def test_read_settings_reads_api_docs_enabled_flag(
     monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
 ) -> None:
     monkeypatch.setenv("API_DOCS_ENABLED", raw)
 
     assert read_settings().api_docs_enabled is expected
+
+
+@pytest.mark.parametrize("raw", ["TRUE", "True", "1", "yes", "0", "no", " true", ""])
+def test_read_settings_rejects_api_docs_enabled_other_than_true_or_false(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("API_DOCS_ENABLED", raw)
+
+    with pytest.raises(ValueError, match="API_DOCS_ENABLED must be 'true' or 'false'"):
+        read_settings()
 
 
 def test_read_settings_reads_values_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:

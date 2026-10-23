@@ -37,6 +37,14 @@ class DemoSettings:
     keepalive_seconds: float = 15.0
 
 
+def read_api_docs_enabled() -> bool:
+    # Same contract as the API (app/config.py): only the exact values true and false are valid.
+    raw = os.environ.get("API_DOCS_ENABLED", "false")
+    if raw not in ("true", "false"):
+        raise ValueError(f"API_DOCS_ENABLED must be 'true' or 'false', got {raw!r}")
+    return raw == "true"
+
+
 def read_settings() -> DemoSettings:
     return DemoSettings(
         api_base_url=os.environ.get("API_BASE_URL", "http://api:8000"),
@@ -45,7 +53,7 @@ def read_settings() -> DemoSettings:
         rabbitmq_ui_url=os.environ.get("RABBITMQ_UI_URL", "http://localhost:15672"),
         hook_base_url=os.environ.get("DEMO_HOOK_BASE_URL", "http://demo:9100"),
         event_buffer_size=int(os.environ.get("EVENT_BUFFER_SIZE", "200")),
-        api_docs_enabled=os.environ.get("API_DOCS_ENABLED", "false") == "true",
+        api_docs_enabled=read_api_docs_enabled(),
     )
 
 

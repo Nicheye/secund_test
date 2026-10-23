@@ -91,8 +91,10 @@ def test_importing_the_module_needs_no_environment(
 def test_module_attribute_app_builds_the_api_from_environment(environment: None) -> None:
     import app.api.main as main_module
 
-    assert main_module.app.title == "Payment service"
-    get_settings.cache_clear()
+    try:
+        assert main_module.app.title == "Payment service"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_unknown_module_attribute_raises_attribute_error() -> None:

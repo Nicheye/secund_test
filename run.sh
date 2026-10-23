@@ -4,8 +4,13 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# The demo service sits behind a compose profile; run.sh always wants it.
-export COMPOSE_PROFILES=demo
+# The demo service sits behind a compose profile; run.sh always wants it. Profiles the caller
+# already set are kept, and demo is not listed twice.
+case ",${COMPOSE_PROFILES:-}," in
+*,demo,*) ;;
+*) COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}demo" ;;
+esac
+export COMPOSE_PROFILES
 
 STATE_FILE=".run.env"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-180}"
@@ -244,6 +249,24 @@ migrate_failure() {
   fi
 }
 
+# Prints a failure reason if api or demo is unhealthy or its container has exited.
+unhealthy_service() {
+  local service id state
+  for service in api demo; do
+    if [ "$(service_health "$service")" = unhealthy ]; then
+      printf 'the %s container is unhealthy' "$service"
+      return 0
+    fi
+    id=$(docker compose ps -a -q "$service" 2>/dev/null | head -n 1) || continue
+    [ -n "$id" ] || continue
+    state=$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || true)
+    if [ "$state" = exited ] || [ "$state" = dead ]; then
+      printf 'the %s container has %s' "$service" "$state"
+      return 0
+    fi
+  done
+}
+
 on_interrupt() {
   printf '\n'
   info "Interrupted. The containers keep running in the background; use ./run.sh status or ./run.sh stop."
@@ -265,6 +288,9 @@ wait_until_ready() {
       return 0
     fi
     reason=$(migrate_failure)
+    if [ -z "$reason" ]; then
+      reason=$(unhealthy_service)
+    fi
     if [ -n "$reason" ]; then
       printf '\r\033[K'
       trap - INT TERM
@@ -307,7 +333,7 @@ cmd_start() {
   choose_ports
   warn_fixed_ports
   info "Starting the stack (first build can take a few minutes)..."
-  docker compose up --build -d
+  docker compose up --build -d || fail_with_diagnostics "docker compose up failed"
   wait_until_ready
   print_summary
   if [ "$open_page" = 1 ]; then

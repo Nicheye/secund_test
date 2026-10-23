@@ -1,82 +1,82 @@
-# Task spec: asynchronous payment processing service
+# Тестовое задание: асинхронный сервис процессинга платежей
 
-Source: `tz_tech.pdf` (English translation of the original Russian spec). The task is a skills
-check and is unpaid.
+Источник: `tz_tech.pdf`. Тестовое задание проверяет навыки и не оплачивается.
 
-## Description
+## Описание
 
-A microservice for asynchronous payment processing. It accepts payment requests, processes them via
-an external payment gateway (emulated) and notifies the client of the result through a webhook.
+Необходимо реализовать микросервис для асинхронной обработки платежей. Сервис принимает запросы на
+оплату, обрабатывает их через внешний платёжный шлюз (эмуляцию) и уведомляет клиента о результате
+через webhook.
 
-## Entity: Payment
+## Сущность: платёж (Payment)
 
-- Payment ID (unique identifier)
-- Amount (decimal)
-- Currency (RUB, USD, EUR)
-- Description (string)
-- Metadata (JSON field for extra information)
-- Status (pending, succeeded, failed)
-- Idempotency key (unique key protecting against duplicates)
-- Webhook URL (to notify about the result)
-- Created and processed dates
+- ID платежа (уникальный идентификатор)
+- Сумма (decimal)
+- Валюта (RUB, USD, EUR)
+- Описание (строка)
+- Метаданные (JSON-поле для дополнительной информации)
+- Статус (pending, succeeded, failed)
+- Idempotency key (уникальный ключ для защиты от дублей)
+- Webhook URL (для уведомления о результате)
+- Даты создания и обработки
 
 ## API
 
-All endpoints require a static API key in the `X-API-Key` header.
+Все эндпоинты требуют статический API-ключ в заголовке `X-API-Key`.
 
-### 1. Create payment: `POST /api/v1/payments`
+### 1. Создание платежа: `POST /api/v1/payments`
 
-- Header: `Idempotency-Key` (required)
-- Body: amount, currency, description, metadata, webhook_url
-- Response: `202 Accepted`, payment_id, status, created_at
+- Заголовок: `Idempotency-Key` (обязательный)
+- Тело: сумма, валюта, описание, метаданные, webhook_url
+- Ответ: `202 Accepted`, payment_id, статус, created_at
 
-### 2. Get payment: `GET /api/v1/payments/{payment_id}`
+### 2. Получение информации о платеже: `GET /api/v1/payments/{payment_id}`
 
-- Response: detailed payment information
+- Ответ: детальная информация о платеже
 
-## Technical requirements
+## Технические требования
 
-### Message broker
+### Брокер сообщений
 
-- On payment creation an event is published to the `payments.new` queue.
-- One consumer:
-  - receives the message from the queue
-  - emulates payment processing (2-5 s, 90% success, 10% failure)
-  - updates the status in the DB
-  - sends a webhook notification to the given URL
-  - retries on webhook delivery errors
+- При создании платежа публикуется событие в очередь `payments.new`.
+- Один consumer:
+  - получает сообщение из очереди
+  - эмулирует обработку платежа (2–5 с, 90% успех, 10% ошибка)
+  - обновляет статус в БД
+  - отправляет webhook-уведомление на указанный URL
+  - реализует повторные попытки при ошибках отправки
 
-### Delivery guarantees
+### Гарантии доставки
 
-- Outbox pattern for guaranteed event publication
-- Idempotency key protects against duplicates
-- Dead Letter Queue for messages not processed after 3 attempts
+- Outbox pattern для гарантированной публикации событий
+- Idempotency key для защиты от дублей
+- Dead Letter Queue для сообщений, не обработанных после 3 попыток
 
-### Stack
+### Стек технологий
 
 - FastAPI + Pydantic v2
-- SQLAlchemy 2.0 (async mode)
+- SQLAlchemy 2.0 (асинхронный режим)
 - PostgreSQL
 - RabbitMQ (FastStream)
-- Alembic (migrations)
+- Alembic (миграции)
 - Docker + docker-compose
 
-## Deliverables
+## Требования к результату
 
-1. Models and migrations: `payments` and `outbox` tables
-2. API endpoints: create and get payment
-3. Consumer: one handler doing everything
-4. Outbox pattern: guaranteed event delivery
-5. Retry: 3 attempts with exponential backoff
-6. Dead Letter Queue: for finally failed messages
-7. Docker: compose file with postgres, rabbitmq, api, consumer
-8. Documentation: README with run instructions and examples
+1. **Модели и миграции:** таблицы payments и outbox
+2. **API эндпоинты:** создание и получение платежа
+3. **Consumer:** один обработчик, делающий всё
+4. **Outbox pattern:** гарантированная доставка событий
+5. **Retry:** 3 попытки с экспоненциальной задержкой
+6. **Dead Letter Queue:** для окончательно упавших сообщений
+7. **Docker:** compose-файл с postgres, rabbitmq, api, consumer
+8. **Документация:** README с запуском и примерами
 
-## Evaluation criteria
+## Критерии оценки
 
-- Architecture and code cleanliness
-- Correct implementation of the Outbox pattern
-- Working with RabbitMQ (queues, exchanges, DLQ)
-- Idempotency
-- Error handling and retry logic
-- Working Docker environment
+- Архитектура и чистота кода
+- Корректная реализация Outbox pattern
+- Работа с RabbitMQ (очереди, обменники, DLQ)
+- Идемпотентность
+- Обработка ошибок и retry-логика
+- Работоспособность Docker-окружения

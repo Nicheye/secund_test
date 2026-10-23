@@ -14,8 +14,8 @@ PostgreSQL, RabbitMQ (FastStream), Alembic, Docker Compose. Spec: [docs/task-spe
 | Doc | What is in it |
 | --- | --- |
 | [README.md](README.md) | Russian-only README: what the service is, architecture, how to run it (`./run.sh`) and test it, the demo UI, API examples, design decisions and trade-offs. |
-| [docs/engineering-principles.md](docs/engineering-principles.md) | Engineering principles, naming, testing, API and fintech-specific rules. Read before writing or reviewing code. |
-| [docs/task-spec.md](docs/task-spec.md) | The assignment: entities, API, outbox, retry/DLQ, stack, deliverables, evaluation criteria. |
+| [docs/engineering-principles.md](docs/engineering-principles.md) | Engineering principles, naming, testing, API and fintech-specific rules (in Russian). Read before writing or reviewing code. |
+| [docs/task-spec.md](docs/task-spec.md) | The assignment (in Russian, as originally given): entities, API, outbox, retry/DLQ, stack, deliverables, evaluation criteria. |
 | [.claude/skills/multiagent/SKILL.md](.claude/skills/multiagent/SKILL.md) | `/multiagent <task>`: plan, implement, test, review pipeline. Subagents are in `.claude/agents/` (`planner`, `implementer`, `tester`, `reviewer`). |
 
 Add new docs to this table. Keep this file a map only: no rules or explanations here.

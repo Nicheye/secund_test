@@ -1,178 +1,198 @@
-# Engineering principles
+# Инженерные принципы
 
-Rules for this project, adapted from common code-review feedback. They are language-agnostic
-because the stack is not chosen yet. Where `AGENTS.md` disagrees, `AGENTS.md` wins.
+Правила проекта, выведенные из типичных замечаний на code review. Они не зависят от языка. Если
+`AGENTS.md` противоречит этому документу, приоритет у `AGENTS.md`.
 
-Ordered by how often each area comes up in review.
-
----
-
-## 1. Core principles
-
-1. **Simpler is better.** Every variable, flag, abstraction, helper and dependency must justify
-   itself. The default review question is "Is it required?"
-2. **Names say exactly what things are**, in the domain's own vocabulary.
-3. **One concept, one name, one source of truth.** No synonyms, no duplicated constants or helpers.
-4. **Explicit over implicit; flat over nested.** No hidden state, magic numbers or strings, or
-   logic inferred from key order or formatted output.
-5. **Fix root causes, not symptoms.** No sleeps, retries or casts that hide a bug. If a hack is
-   unavoidable, contain it at one call site and comment why.
-6. **Fail loud for developers, safe for users.** Never swallow exceptions that signal real bugs.
-   Clients get stable, documented error responses; logs get the detail.
-7. **Think "what happens when...":** null, empty, zero, many; duplicate request; retry after
-   timeout; two requests at the same instant; insufficient funds; unknown currency; deleted or
-   foreign account; a hundred times more load.
-8. **Write code as if from scratch knowing all requirements.** Refactor properly; don't carry
-   old workarounds over.
-9. **YAGNI, with cheap foresight.** Don't add structure for the future, but shape signatures so the
-   obvious next step doesn't need a rewrite.
+Разделы расположены по тому, как часто соответствующая тема всплывает на ревью.
 
 ---
 
-## 2. Fintech rules (highest priority for this project)
+## 1. Основные принципы
 
-These are what a reviewer of a money-handling service checks first.
-
-- **Money is never a float.** Store and compute in integer minor units (cents) or an exact
-  decimal type. Amount and currency travel together as one value; never add or compare amounts of
-  different currencies. Define rounding mode and scale once, in one place.
-- **Amounts are validated at the boundary:** positive for transfers, within limits, valid currency
-  code from a known set.
-- **Idempotency on every write endpoint.** Clients send an idempotency key; the same key with the
-  same payload returns the original result, the same key with a different payload is rejected.
-  Enforce it with a unique constraint, not an in-memory check.
-- **Atomicity.** A transfer's debit, credit and ledger entries commit in one transaction or not at
-  all. No partial state is ever observable.
-- **No lost updates, no double spend.** Concurrent operations on one account must be serialized
-  (row lock, optimistic version check, or serializable isolation). Acquire locks in a consistent
-  order (e.g. by account id) to avoid deadlocks. Document the choice and its trade-offs.
-- **Ledger is append-only.** Never update or delete a posted entry; corrections are new
-  compensating entries. Prefer double-entry: every transfer is balanced debits and credits.
-  Balance is either derived from the ledger or provably consistent with it.
-- **State machines are explicit.** Transaction states (e.g. pending, completed, failed, reversed)
-  and allowed transitions live in one place; illegal transitions raise errors.
-- **Auditability.** Every state-changing operation records who, what, when and a correlation id.
-- **Never log secrets or sensitive data** (full card numbers, tokens, credentials). Mask
-  identifiers where needed.
-- **Time:** timestamps are UTC, timezone-aware; intervals are half-open `[from, to)`.
-- **IDs:** opaque and non-sequential for anything exposed to clients (UUID or similar).
-- **Authorization on every operation.** Access rules live in one place; a missing or foreign
-  object returns 404, never another user's data.
-- **Secure defaults:** no fallback to the most permissive mode; validate against known values.
+1. **Проще — лучше.** Каждая переменная, флаг, абстракция, вспомогательная функция и зависимость
+   должны оправдывать своё существование. Вопрос ревью по умолчанию: «Это обязательно?»
+2. **Имена точно говорят, чем являются вещи**, и используют словарь предметной области.
+3. **Одно понятие — одно имя — один источник правды.** Никаких синонимов и дублирующихся констант
+   или хелперов.
+4. **Явное лучше неявного, плоское лучше вложенного.** Никакого скрытого состояния, магических чисел
+   и строк, никакой логики, которая зависит от порядка ключей или форматированного вывода.
+5. **Чините причины, а не симптомы.** Никаких `sleep`, повторов и приведений типов, которые прячут
+   ошибку. Если костыль неизбежен, ограничьте его одним местом вызова и объясните комментарием, зачем
+   он нужен.
+6. **Шумно для разработчиков, безопасно для пользователей.** Не глотайте исключения, которые
+   сигнализируют о настоящих багах. Клиенты получают стабильные документированные ответы об ошибках,
+   а подробности попадают в логи.
+7. **Думайте «а что, если...»:** null, пусто, ноль, много; повторный запрос; повтор после таймаута;
+   два запроса в один и тот же момент; недостаточно средств; неизвестная валюта; удалённый или чужой
+   счёт; нагрузка выше в сто раз.
+8. **Пишите код так, будто вы писали его с нуля и знали все требования.** Рефакторьте как следует,
+   не тащите за собой старые обходные пути.
+9. **YAGNI, но с дешёвой дальновидностью.** Не добавляйте структуру «на будущее», но формируйте
+   сигнатуры так, чтобы очевидный следующий шаг не требовал переписывания.
 
 ---
 
-## 3. Naming
+## 2. Финтех-правила (высший приоритет для этого проекта)
 
-- **Name = content.** Type, plurality and meaning match: `accountIds` holds ids, `account` holds
-  an account. A misleading name is worse than a long one.
-- **Use existing domain terms; never invent new ones.** Pick one of account/wallet,
-  transfer/payment, balance/funds, remove/delete, and use it everywhere: code, API, DB, docs.
-- **Symmetry:** paired names agree (`debit` / `credit`, `fromAccount` / `toAccount`).
-- **No redundancy with context:** `Transfer.status`, not `Transfer.transferStatus`; no type
-  suffixes like `List` or `Array`; no `I`/`T` prefixes; don't leak implementation into names.
-- **No abbreviations** except the universal (id, url, http, json, db).
-- **Booleans** are `is`/`has` or adjectives, named after the non-default state, and positive
-  (`isFrozen`, not `isNotActive`).
-- **Functions** start with verbs; `create`/`delete`/`add` mean what they actually do.
-  Meaningless words: `data`, `info`, `item`, `handle`, `process`, `manager`, `helper`.
-- **Constants** UPPER_CASE; **enums** are used instead of string literals; event and status
-  names are past participles or clear states (`TRANSFER_COMPLETED`).
-- **Test names** state the exact behaviour and match the assertion
+Именно это ревьюер проверяет в первую очередь в сервисе, который работает с деньгами.
+
+- **Деньги — никогда не float.** Храните и считайте в целых минимальных единицах (копейки, центы)
+  или в точном десятичном типе. Сумма и валюта путешествуют вместе как одно значение. Нельзя
+  складывать и сравнивать суммы в разных валютах. Режим округления и масштаб определяются один раз и
+  в одном месте.
+- **Суммы проверяются на границе:** положительные для переводов, в пределах лимитов, код валюты из
+  известного набора.
+- **Идемпотентность у каждого эндпоинта записи.** Клиент присылает ключ идемпотентности: тот же ключ
+  с тем же телом возвращает исходный результат, тот же ключ с другим телом отклоняется. Гарантия
+  держится на ограничении уникальности, а не на проверке в памяти.
+- **Атомарность.** Дебет, кредит и записи книги перевода фиксируются в одной транзакции или не
+  фиксируются вовсе. Частичное состояние никогда не должно быть видно снаружи.
+- **Без потерянных обновлений и двойного списания.** Параллельные операции над одним счётом нужно
+  сериализовать (блокировка строки, проверка версии или уровень изоляции serializable). Блокировки
+  берите в едином порядке (например, по id счёта), чтобы избежать взаимных блокировок. Задокументируйте
+  выбор и его компромиссы.
+- **Книга операций только дописывается.** Проведённую запись нельзя изменять или удалять, исправления
+  делаются новыми компенсирующими записями. Предпочтительна двойная запись: каждый перевод — это
+  сбалансированные дебеты и кредиты. Баланс либо выводится из книги, либо доказуемо ей соответствует.
+- **Конечные автоматы явные.** Состояния транзакции (например, pending, completed, failed, reversed)
+  и допустимые переходы описаны в одном месте, недопустимый переход вызывает ошибку.
+- **Аудит.** Каждая операция, меняющая состояние, фиксирует, кто, что, когда и correlation id.
+- **Никогда не логируйте секреты и чувствительные данные** (номера карт целиком, токены, учётные
+  данные). Идентификаторы маскируйте там, где это нужно.
+- **Время:** метки времени в UTC и с часовым поясом, интервалы полуоткрытые `[from, to)`.
+- **Идентификаторы:** всё, что видно клиентам, непрозрачно и непоследовательно (UUID или подобное).
+- **Авторизация в каждой операции.** Правила доступа живут в одном месте, отсутствующий или чужой
+  объект даёт 404 и никогда не отдаёт данные другого пользователя.
+- **Безопасные значения по умолчанию:** никакого отката к самому разрешающему режиму, проверка по
+  известным значениям.
+
+---
+
+## 3. Именование
+
+- **Имя = содержимое.** Тип, число и смысл совпадают: `accountIds` хранит идентификаторы, `account`
+  хранит счёт. Вводящее в заблуждение имя хуже длинного.
+- **Используйте существующие термины предметной области, не изобретайте новые.** Выберите один из
+  account/wallet, transfer/payment, balance/funds, remove/delete и применяйте везде: в коде, API, БД и
+  документации.
+- **Симметрия:** парные имена согласованы (`debit` / `credit`, `fromAccount` / `toAccount`).
+- **Без избыточности относительно контекста:** `Transfer.status`, а не `Transfer.transferStatus`;
+  без суффиксов типа `List` или `Array`; без префиксов `I`/`T`; не выносите детали реализации в
+  имена.
+- **Без сокращений**, кроме общепринятых (id, url, http, json, db).
+- **Булевы значения** называются через `is`/`has` или прилагательными, по неосновному состоянию, и
+  позитивно (`isFrozen`, а не `isNotActive`).
+- **Функции** начинаются с глагола; `create`/`delete`/`add` означают именно то, что происходит на
+  самом деле. Пустые слова: `data`, `info`, `item`, `handle`, `process`, `manager`, `helper`.
+- **Константы** пишутся в UPPER_CASE; вместо строковых литералов используются **enum**; имена
+  событий и статусов — причастия прошедшего времени или понятные состояния (`TRANSFER_COMPLETED`).
+- **Имена тестов** точно называют поведение и совпадают с проверкой
   (`rejects_transfer_when_balance_is_insufficient`).
-- If a naming question came up once, it will come up again: fix the name or comment.
+- Если вопрос об имени возник один раз, он возникнет снова: исправьте имя или оставьте комментарий.
 
 ---
 
-## 4. Testing
+## 4. Тестирование
 
-- **A test must be able to fail.** Remove the code under test and it goes red. Filter tests need
-  distractor data. No tautological assertions.
-- **Bug fixes start with a failing test** that reproduces the bug.
-- **Every behaviour is tested, including negative and edge cases:** insufficient funds, zero and
-  negative amounts, same-account transfer, unknown account, currency mismatch, duplicate
-  idempotency key, illegal state transition.
-- **Concurrency test is mandatory:** many parallel transfers on shared accounts must preserve the
-  total balance and never allow a negative balance. Idempotency under parallel duplicates too.
-- **Assert against storage directly**, not only through the API, and write expected values
-  literally (whole-object equality, explicit numbers) with no logic in assertions.
-- Test only what's relevant; make preconditions explicit; use realistic neutral data.
-- **One bug should fail one test.** Separate pure logic tests from the thin API wiring tests.
-- Use parametrization for case matrices.
-- **Mock only third-party boundaries** (external payment providers, email, clock), never our own
-  functions. Freeze time instead of sleeping.
-- Arrange / Act / Assert separated by blank lines. Don't delete existing tests when refactoring.
-- Never bend business logic to make tests easier; use fixtures or configuration.
-
----
-
-## 5. Data layer
-
-- Constraints live in the database as well as in code: `NOT NULL`, `UNIQUE` (idempotency key),
-  `CHECK` (non-negative balance where applicable), foreign keys with deliberate delete behaviour.
-- Justify every nullable column and every index.
-- Avoid N+1 queries: aggregate in the database, hoist loop invariants, batch updates.
-- Prefer upsert/`get or create` primitives that are atomic over check-then-insert.
-- Migrations are sequential, minimal, and match the models. New columns on populated tables are
-  nullable first, then backfilled. Data migrations are idempotent.
-- Repository/query objects own access rules and filtering; business logic doesn't build ad-hoc
-  queries.
+- **Тест должен уметь падать.** Удалите проверяемый код — тест должен покраснеть. Тестам с
+  фильтрацией нужны отвлекающие данные. Тавтологических проверок быть не должно.
+- **Исправление бага начинается с падающего теста,** который его воспроизводит.
+- **Каждое поведение покрыто тестом, включая негативные и граничные случаи:** недостаточно средств,
+  нулевые и отрицательные суммы, перевод на тот же счёт, неизвестный счёт, несовпадение валют,
+  повторный ключ идемпотентности, недопустимый переход состояния.
+- **Тест на конкурентность обязателен:** много параллельных переводов по общим счетам должны
+  сохранять суммарный баланс и никогда не допускать отрицательного. Идемпотентность при параллельных
+  дублях проверяется тоже.
+- **Проверяйте напрямую по хранилищу,** а не только через API, и записывайте ожидаемые значения
+  буквально (равенство целого объекта, явные числа), без логики внутри проверок.
+- Проверяйте только то, что относится к делу, делайте предусловия явными, используйте реалистичные
+  нейтральные данные.
+- **Один баг должен ронять один тест.** Тесты чистой логики отделяйте от тонких тестов подключения к
+  API.
+- Для матриц случаев используйте параметризацию.
+- **Мокайте только границы со сторонними системами** (внешние платёжные провайдеры, почта, часы),
+  никогда не свои функции. Время замораживайте, а не ждите через sleep.
+- Arrange / Act / Assert разделяются пустыми строками. При рефакторинге не удаляйте существующие
+  тесты.
+- Не искажайте бизнес-логику ради удобства тестов: используйте фикстуры или конфигурацию.
 
 ---
 
-## 6. API design
+## 5. Слой данных
 
-- Resource-oriented REST, consistent URL style, correct HTTP status codes
-  (400 validation, 401/403 auth, 404 missing or foreign, 409 conflict or idempotency mismatch,
-  422 business rule violation as the project chooses and documents).
-- One error response shape across the API, with a stable machine-readable code and a message.
-- Validation happens in a dedicated layer at the boundary, not scattered through business logic.
-- Amounts in responses are explicit about scale and currency; datetimes are ISO-8601 UTC.
-- List endpoints are paginated and have a stable order.
-- Don't expose fields clients don't need. Version breaking changes; keep clients working.
-- Write endpoints accept an idempotency key (see section 2).
-
----
-
-## 7. Architecture and style
-
-- **Right module, right layer:** transport (HTTP) -> service (business rules) -> persistence.
-  Business logic does not know about HTTP; persistence does not contain business decisions.
-- Separate business logic from invocation concerns (retries, queues, scheduling).
-- Prefer functions over classes unless modelling a real thing. Prefer composition.
-- Early returns; shallow nesting; readable over clever; lookup tables over long branching.
-- Catch specific exceptions only; never a bare catch; domain errors are typed.
-- Immutability by default; avoid shared mutable state.
-- Configuration via one config module; no scattered environment reads; no secrets in the repo.
-- Dependencies must be justified: standard library first, official SDKs over hand-rolled
-  clients, no library for a single call.
-- Imports at the top of the module; relative within a package, absolute across packages.
+- Ограничения живут и в базе данных, и в коде: `NOT NULL`, `UNIQUE` (ключ идемпотентности), `CHECK`
+  (неотрицательный баланс, где применимо), внешние ключи с осознанным поведением при удалении.
+- Обосновывайте каждую nullable-колонку и каждый индекс.
+- Избегайте запросов N+1: агрегируйте в базе, выносите инварианты из циклов, обновляйте пачками.
+- Предпочитайте атомарные примитивы upsert и `get or create` схеме «проверить, затем вставить».
+- Миграции последовательные, минимальные и соответствуют моделям. Новые колонки в заполненных
+  таблицах сначала делаются nullable, потом заполняются. Миграции данных идемпотентны.
+- Правила доступа и фильтрация принадлежат объектам репозитория или запросов, бизнес-логика не
+  строит запросы на лету.
 
 ---
 
-## 8. Comments, docs and hygiene
+## 6. Дизайн API
 
-- **Comments** in English, only for the non-obvious *why*: concurrency choices, rounding, trade-offs.
-  No restating code, no TODOs, no history, no commented-out code.
-- No debug prints, placeholder data, or stray files in a change.
-- The README explains how to run, how to test, key design decisions and their trade-offs, what
-  was deliberately left out, and what would come next. Treat it as part of the deliverable.
-
----
-
-## 9. Process and git
-
-- One concern per change; revert unrelated edits (formatting, lockfiles, renames).
-- Review your own diff before asking anyone else to.
-- Never commit to `main` directly; short lowercase-hyphen branch names; no `git add .`.
-- Commit messages and PR titles say what truly changed.
-- CI runs lint, type check and tests; keep scripts as simple as possible.
+- REST, ориентированный на ресурсы, единый стиль URL, корректные коды HTTP (400 — валидация, 401/403
+  — аутентификация и доступ, 404 — нет или чужой объект, 409 — конфликт или несовпадение
+  идемпотентности, 422 — нарушение бизнес-правила, как проект выберет и задокументирует).
+- Одна структура ответа об ошибке на весь API: стабильный машиночитаемый код и сообщение.
+- Валидация выполняется в отдельном слое на границе, а не разбросана по бизнес-логике.
+- В ответах суммы явно указывают масштаб и валюту, а даты и время — ISO-8601 в UTC.
+- Эндпоинты списков разбиты на страницы и имеют стабильный порядок.
+- Не раскрывайте поля, которые клиентам не нужны. Ломающие изменения версионируйте, существующих
+  клиентов не ломайте.
+- Эндпоинты записи принимают ключ идемпотентности (см. раздел 2).
 
 ---
 
-## 10. Review taste
+## 7. Архитектура и стиль
 
-- Pet peeves: synonyms and invented terms; single-use variables; magic numbers; sleep-based
-  fixes; defensive checks for impossible states together with missing checks for real nulls;
-  tests that pass for the wrong reason; hidden state; leftovers.
-- Ask "What if...?" and "Why?" and attach a concrete suggestion.
+- **Нужный модуль, нужный слой:** транспорт (HTTP) -> сервис (бизнес-правила) -> хранение.
+  Бизнес-логика ничего не знает про HTTP, слой хранения не содержит бизнес-решений.
+- Отделяйте бизнес-логику от способа вызова (повторы, очереди, планирование).
+- Функции предпочтительнее классов, если не моделируется реальная сущность. Композиция предпочтительнее
+  наследования.
+- Ранние возвраты, небольшая вложенность, читаемость важнее хитрости, таблицы соответствия лучше
+  длинных ветвлений.
+- Перехватывайте только конкретные исключения, никаких голых catch, доменные ошибки типизированы.
+- По умолчанию неизменяемость, избегайте общего изменяемого состояния.
+- Конфигурация — через один модуль, без разбросанного чтения переменных окружения, без секретов в
+  репозитории.
+- Зависимости нужно обосновывать: сначала стандартная библиотека, официальные SDK вместо
+  самописных клиентов, без библиотеки ради одного вызова.
+- Импорты в начале модуля: относительные внутри пакета, абсолютные между пакетами.
+
+---
+
+## 8. Комментарии, документация и аккуратность
+
+- **Комментарии** в коде пишутся на английском и только про неочевидное «почему»: выбор способа
+  конкурентности, округление, компромиссы. Без пересказа кода, без TODO, без истории, без
+  закомментированного кода.
+- В изменении не должно быть отладочных `print`, заглушек данных и посторонних файлов.
+- README объясняет, как запустить и как тестировать, ключевые проектные решения и их компромиссы,
+  что намеренно не сделано и что будет дальше. Считайте его частью результата.
+
+---
+
+## 9. Процесс и git
+
+- Одно изменение — одна задача; несвязанные правки (форматирование, lock-файлы, переименования)
+  откатывайте.
+- Просматривайте собственный diff, прежде чем просить об этом других.
+- Не коммитьте в `main` напрямую, имена веток короткие, в нижнем регистре, через дефис, без
+  `git add .`.
+- Сообщения коммитов и заголовки PR говорят о том, что действительно изменилось.
+- CI запускает линтер, проверку типов и тесты, скрипты держите как можно проще.
+
+---
+
+## 10. Вкус ревьюера
+
+- Что раздражает: синонимы и придуманные термины; переменные, которые используются один раз;
+  магические числа; исправления через sleep; защитные проверки на невозможные состояния при
+  отсутствующих проверках настоящих null; тесты, проходящие по неверной причине; скрытое состояние;
+  оставленный мусор.
+- Задавайте вопросы «А что, если...?» и «Почему?» и прикладывайте конкретное предложение.
